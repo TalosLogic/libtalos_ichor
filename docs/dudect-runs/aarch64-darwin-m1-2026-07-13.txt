@@ -1,0 +1,93 @@
+================================================================
+ichor dudect timing-validation evidence trail
+Architecture: aarch64 (Apple M1, macOS)
+Host:         macOS / clang
+Date:         2026-07-13 (Run 1, v1.0.0 initial constant-time gate)
+================================================================
+
+Environment
+-----------
+  CPU:        Apple M1 (aarch64)
+  Compiler:   clang (Apple toolchain default)
+  Target:     dudect (ichor_dudect_core built with NO hardware
+              acceleration flags; ICHOR_AES_NI / ARMV8_AES / CLMUL /
+              PMULL all disabled so the binary exercises the bitsliced
+              src/aes_ct64.c path and the scalar carry-less multiply).
+
+  Why this host: a non-x86 microarchitecture (Apple Firestorm/Icestorm)
+  and a different compiler (clang), so a PASS here corroborates that the
+  constant-time property is a property of the code, not of one toolchain
+  or ISA.
+
+Build
+-----
+  cmake -B build -DICHOR_BUILD_DUDECT=ON
+  cmake --build build --target dudect
+
+Runtime
+-------
+  Timer:      CNTVCT_EL0 (aarch64 macOS, 24 MHz, ~41.7 ns/tick)
+  Affinity:   pinned to CPU 0
+  Governor:   (macOS: no user-space frequency governor; P/E-core
+              migration adds noise -- run on a quiet host)
+  Crop:       [1.00%, 99.00%]
+  Threshold:  |t| > 4.5  ->  FAIL
+
+
+================================================================
+Run 1 -- 2026-07-13  --all --samples 200000  (v1.0.0 software
+                                              constant-time gate)
+================================================================
+
+  Full target set: the two harness sentinels, the four bitsliced-AES
+  targets (key- and plaintext-varying, single and x4), the two scalar
+  carry-less multiply targets, and the const_memcmp comparator added
+  for the voleith 1.10.1 parity gate.
+
+  sentinel_leak            |t| = 9379.49  FAIL  (expected sanity check)
+  sentinel_clean           |t| =    0.13  PASS
+  aes_ct64_encrypt_key     |t| =    0.90  PASS
+  aes_ct64_encrypt_x4_key  |t| =    1.05  PASS
+  aes_ct64_encrypt_pt      |t| =    0.02  PASS
+  aes_ct64_encrypt_x4_pt   |t| =    0.45  PASS
+  clmul64_scalar_b         |t| =    0.16  PASS
+  clmul64_scalar_a         |t| =    0.08  PASS
+  const_memcmp             |t| =    0.30  PASS  (new; parity gate)
+
+  Notes:
+    Clean run: the planted sentinel_leak fails (9379) and all eight real
+    targets pass with wide margin (max real |t| = 1.05, aes_ct64 x4 key
+    schedule).  The coarser 24 MHz CNTVCT_EL0 timer widens the sentinel
+    margin but leaves the real targets well under threshold.
+
+    const_memcmp: class A compares equal 32-byte buffers, class B buffers
+    that differ in one byte at a uniformly random position; the fixed
+    length and the OR-accumulator (no early exit) make the running time
+    independent of both equality and first-difference position.
+
+    SHAKE / Keccak is not dudected: it is constant-time by construction
+    (no S-box, no data table, no secret-indexed load, no secret-dependent
+    branch), so there is no timing signal for the harness to detect.
+
+
+================================================================
+Run 2 -- 2026-07-14  --all --samples 200000  (Grøstl core-primitive
+                                              gate, voleith 1.10.1)
+================================================================
+
+  Grøstl-256 and Grøstl-512 one-shot targets, added when the Grøstl
+  core primitive moved into ichor for the libtalos_syndrome
+  designated-opener driver.  Class A hashes an all-zero 256-byte
+  message; class B a uniformly random 256-byte message; the length is
+  fixed across both classes, so a PASS certifies the digest time is
+  independent of message content (the bitsliced SubBytes path has no
+  secret-indexed table load).
+
+  grostl256_input          |t| = 0.11  PASS
+  grostl512_input          |t| = 0.95  PASS
+
+  Notes:
+    A non-x86 uarch and clang corroborate that the Grøstl constant-time
+    property is a property of the code, not one toolchain or ISA.  The
+    coarser 24 MHz CNTVCT_EL0 timer leaves both targets well under
+    threshold (max real |t| = 0.95, grostl512).

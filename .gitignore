@@ -1,0 +1,13 @@
+# Build output
+/build/
+build*/
+*.o
+*.a
+*.so
+*.dylib
+
+.clang-format
+
+# Editor / OS cruft
+*.swp
+.DS_Store

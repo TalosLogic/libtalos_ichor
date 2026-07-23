@@ -1,0 +1,93 @@
+================================================================
+ichor dudect timing-validation evidence trail
+Architecture: x86_64 (Intel Sandy Bridge-EP)
+Host:         Linux / gcc
+Date:         2026-07-13 (Run 1, v1.0.0 initial constant-time gate)
+================================================================
+
+Environment
+-----------
+  CPU:        Intel Sandy Bridge-EP (Xeon E5)
+  Compiler:   gcc (toolchain default)
+  Target:     dudect (ichor_dudect_core built with NO hardware
+              acceleration flags; ICHOR_AES_NI / ARMV8_AES / CLMUL /
+              PMULL all disabled so the binary exercises the bitsliced
+              src/aes_ct64.c path and the scalar carry-less multiply).
+
+  Why this host: Sandy Bridge-EP is the reference x86_64 uarch for the
+  Talos constant-time gate; its integer-divide latency is data-dependent,
+  which is the class of leak these software paths must avoid.
+
+Build
+-----
+  cmake -B build -DICHOR_BUILD_DUDECT=ON
+  cmake --build build --target dudect
+
+Runtime
+-------
+  Timer:      RDTSCP (x86_64 cycles)
+  Affinity:   pinned to CPU 0 (sched_setaffinity)
+  Governor:   performance
+  Crop:       [1.00%, 99.00%]
+  Threshold:  |t| > 4.5  ->  FAIL
+
+
+================================================================
+Run 1 -- 2026-07-13  --all --samples 200000  (v1.0.0 software
+                                              constant-time gate)
+================================================================
+
+  Full target set: the two harness sentinels, the four bitsliced-AES
+  targets (key- and plaintext-varying, single and x4), the two scalar
+  carry-less multiply targets, and the const_memcmp comparator added
+  for the voleith 1.10.1 parity gate.
+
+  sentinel_leak            |t| = 1421.38  FAIL  (expected sanity check)
+  sentinel_clean           |t| =    1.21  PASS
+  aes_ct64_encrypt_key     |t| =    0.12  PASS
+  aes_ct64_encrypt_x4_key  |t| =    0.31  PASS
+  aes_ct64_encrypt_pt      |t| =    0.34  PASS
+  aes_ct64_encrypt_x4_pt   |t| =    0.55  PASS
+  clmul64_scalar_b         |t| =    0.28  PASS
+  clmul64_scalar_a         |t| =    0.57  PASS
+  const_memcmp             |t| =    0.74  PASS  (new; parity gate)
+
+  Notes:
+    Clean run: the planted sentinel_leak fails (1421) and all eight real
+    targets pass with wide margin (max real |t| = 0.74, const_memcmp).
+    Every |t| trace walked around zero rather than scaling with sqrt(n),
+    and class sigmas matched within ~0.3%, the signature of identical
+    control flow across input classes.
+
+    const_memcmp: class A compares equal 32-byte buffers, class B buffers
+    that differ in one byte at a uniformly random position; the fixed
+    length and the OR-accumulator (no early exit) make the running time
+    independent of both equality and first-difference position.
+
+    SHAKE / Keccak is not dudected: it is constant-time by construction
+    (no S-box, no data table, no secret-indexed load, no secret-dependent
+    branch), so there is no timing signal for the harness to detect.
+
+
+================================================================
+Run 2 -- 2026-07-14  --all --samples 200000  (Grøstl core-primitive
+                                              gate, voleith 1.10.1)
+================================================================
+
+  Grøstl-256 and Grøstl-512 one-shot targets, added when the Grøstl
+  core primitive moved into ichor for the libtalos_syndrome
+  designated-opener driver.  Class A hashes an all-zero 256-byte
+  message; class B a uniformly random 256-byte message; the length is
+  fixed across both classes, so a PASS certifies the digest time is
+  independent of message content (the bitsliced SubBytes path has no
+  secret-indexed table load).
+
+  grostl256_input          |t| = 1.07  PASS
+  grostl512_input          |t| = 0.49  PASS
+
+  Notes:
+    Both targets exercise the same bitsliced AES SubBytes path the
+    aes_ct64 targets cover (Grøstl dispatches on the same feature bits;
+    the dudect core is built with the hardware defines unset), now over
+    the full Grøstl permutation and MixBytes/ShiftBytes layers.  Max
+    real |t| = 1.07 (grostl256), well under the 4.5 threshold.
