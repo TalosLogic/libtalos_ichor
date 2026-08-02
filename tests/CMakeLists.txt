@@ -82,6 +82,11 @@ ichor_add_test(test_util test_util.c)
 # size_t-overflow guard.  Pure C, no backend dispatch.
 ichor_add_test(test_bitpack test_bitpack.c)
 
+# Fixed-weight index sampler (ichor/sample.h): tape accounting, all-zero KAT,
+# equivalence to a reference full-array Fisher-Yates over the same tape, and
+# argument validation.  The CT property is validated by the dudect target.
+ichor_add_test(test_sample test_sample.c)
+
 # Block-cipher compression primitives over AES (Hirose DBL, Davies-Meyer).
 # Both get an _sw profile so the bitsliced AES path is exercised too.
 ichor_add_test(test_hirose test_hirose.c)
@@ -101,4 +106,15 @@ target_include_directories(test_clmul PRIVATE ${ICHOR_TEST_INCLUDES})
 add_test(NAME test_clmul COMMAND $<TARGET_FILE:test_clmul>)
 add_test(NAME test_clmul_sw COMMAND $<TARGET_FILE:test_clmul>)
 set_tests_properties(test_clmul_sw PROPERTIES
+    ENVIRONMENT "ICHOR_FORCE_BACKEND=clmul:scalar")
+
+# F_2[x]/(x^p - 1) ring: parameter-driven algebraic KAT.  Dispatches through
+# clmul, so the _sw profile forces the scalar clmul fallback (matching
+# test_clmul) rather than the aes:bitsliced override.
+add_executable(test_gf2x test_gf2x.c)
+target_link_libraries(test_gf2x PRIVATE ichor)
+target_include_directories(test_gf2x PRIVATE ${ICHOR_TEST_INCLUDES})
+add_test(NAME test_gf2x COMMAND $<TARGET_FILE:test_gf2x>)
+add_test(NAME test_gf2x_sw COMMAND $<TARGET_FILE:test_gf2x>)
+set_tests_properties(test_gf2x_sw PROPERTIES
     ENVIRONMENT "ICHOR_FORCE_BACKEND=clmul:scalar")

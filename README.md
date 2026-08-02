@@ -18,9 +18,11 @@ one clean-room, constant-time place instead of duplicated per repo.
 | `<ichor/clmul.h>`   | 64×64→128-bit carry-less (polynomial) multiply: PCLMULQDQ (x86_64), PMULL (aarch64), and a constant-time scalar fallback. The shared atom for binary-field arithmetic. |
 | `<ichor/aesdm.h>`   | AES-128 Davies-Meyer single-block compression. |
 | `<ichor/hirose.h>`  | Hirose double-block-length compression over AES-256 (256-bit output). |
+| `<ichor/gf2x.h>`    | Constant-time circulant arithmetic over F_2[x]/(x^p - 1) (multiply, rotate, invert) for QC-MDPC codes; the shared ring beneath libtalos_syndrome and libtalos_voleith. |
+| `<ichor/sample.h>`  | Constant-time fixed-weight index sampling from a caller-supplied random tape: `ichor_sample_fixed_weight` draws `w` distinct indices in `[0, n)` in draw order (a pure function of the tape, fixed consumption) via overlay Fisher-Yates + widened Lemire reduction; `ichor_sample_sort_ascending` canonicalizes a drawn support to ascending order with a constant-time bitonic network. The shared support sampler for fixed-weight errors. |
 | `<ichor/cpu.h>`     | Runtime CPU feature detection (cached bitmask) feeding the dispatch tables. |
 | `<ichor/backend.h>` | Query which backend each primitive selected, and whether it is optimal for this CPU or a software fallback (see [CPU dispatch](#cpu-dispatch)). |
-| `<ichor/util.h>`    | `ichor_secure_zero` (non-elidable wipe) and `ichor_const_memcmp` (constant-time compare). |
+| `<ichor/util.h>`    | `ichor_secure_zero` (non-elidable wipe), `ichor_const_memcmp` (constant-time compare), and `ichor_ct_mask64` / `ichor_ct_select64` (opaque constant-time select). |
 
 Every backend, including each software fallback, is constant-time in its
 secret inputs; the dispatch decision is on public CPU-feature bits only.
@@ -121,6 +123,14 @@ cmake --build build --target dudect
 Recorded results across x86_64 (Sandy Bridge, Gracemont) and aarch64 (Apple M1)
 hosts live in [`docs/dudect-runs/`](docs/dudect-runs/) as the constant-time
 evidence trail.
+
+These results are specific to the compiler and flags they were produced under
+(the default release configuration). Changing the toolchain version or build
+flags can alter the emitted code and invalidate them; in particular, do not add
+`-flto`, which can inline the out-of-line constant-time barriers
+(`ichor_ct_mask64` / `ichor_ct_select64` / `ichor_const_memcmp`) and reintroduce
+a secret-dependent branch. If you change either, re-running the harness and
+re-checking the disassembly is the builder's responsibility.
 
 ## Provenance
 

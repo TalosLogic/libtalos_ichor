@@ -7,6 +7,8 @@
  * Provides:
  *   ichor_secure_zero   - zero memory in a way the compiler cannot elide
  *   ichor_const_memcmp  - constant-time byte comparison (no data-dependent branches)
+ *   ichor_ct_mask64     - opaque all-ones/all-zeros mask from a secret bit
+ *   ichor_ct_select64   - constant-time select between two 64-bit words
  */
 
 #ifndef ICHOR_UTIL_H
@@ -34,6 +36,39 @@ void ichor_secure_zero(void *ptr, size_t len);
  * commitment hashes, challenge values, MACs).
  */
 int ichor_const_memcmp(const void *a, const void *b, size_t len);
+
+/*
+ * Constant-time selection primitives.
+ *
+ * ichor_ct_mask64(bit) returns an all-ones mask (0xFFFFFFFFFFFFFFFF) when the
+ * low bit of `bit` is 1, and all-zeros when it is 0.  The value is routed
+ * through a volatile so the compiler cannot prove it is one of {0, ~0} and
+ * lower a dependent select into a branch.  This is not hypothetical: at -O3,
+ * clang was observed rewriting the open-coded idiom
+ *
+ *     x = (a & mask) | (b & ~mask);
+ *
+ * into a secret-dependent branch (skip the store when the bit is 0), which is
+ * a timing side channel.  Form the mask once with this helper, then blend with
+ * ichor_ct_select64 or the open-coded AND/OR; the blend stays branchless and
+ * vectorizable because `mask` is opaque to the caller's optimizer.  In a hot
+ * loop, call ichor_ct_mask64 once outside the loop and open-code the blend
+ * inside, so there is no per-element call.
+ *
+ * ichor_ct_select64(mask, a, b) returns a if `mask` is all-ones and b if it is
+ * all-zeros: (a & mask) | (b & ~mask).  Pass a mask produced by
+ * ichor_ct_mask64; any other value gives a bitwise mix, not a select.
+ *
+ * The constant-time guarantee is a property of the emitted machine code, not
+ * the C source, so it must be re-checked in the disassembly after any compiler
+ * or flag change.  In particular, the opacity relies on this helper staying
+ * out-of-line: link-time / whole-program optimization (`-flto`) can inline it
+ * into the caller, expose the volatile's value to the optimizer, and
+ * reintroduce the secret-dependent branch.  Do not enable LTO without
+ * re-verifying in the disassembly and re-running the dudect suite.
+ */
+uint64_t ichor_ct_mask64(uint64_t bit);
+uint64_t ichor_ct_select64(uint64_t mask, uint64_t a, uint64_t b);
 
 /*
  * Pack `count` fixed-width integers into a byte buffer, LSB-first.

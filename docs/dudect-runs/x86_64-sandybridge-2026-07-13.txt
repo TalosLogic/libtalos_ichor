@@ -91,3 +91,60 @@ Run 2 -- 2026-07-14  --all --samples 200000  (Grøstl core-primitive
     the dudect core is built with the hardware defines unset), now over
     the full Grøstl permutation and MixBytes/ShiftBytes layers.  Max
     real |t| = 1.07 (grostl256), well under the 4.5 threshold.
+
+
+================================================================
+Run 3 -- 2026-07-31  per-target --samples 200000  (v1.1.0 gf2x
+                                              circulant ring +
+                                              fixed-weight sampler gate)
+================================================================
+
+  The six constant-time targets added for the 1.1.0 gf2x circulant ring
+  (multiply, variable-amount rotation, the ct-select helper, Itoh-Tsujii
+  inversion, support scatter) and the fixed-weight index sampler.  Each
+  target was run on its own at the release-gate sample count.
+
+  gf2x_mul_operand         |t| = 0.22  PASS
+  gf2x_rotl_amount         |t| = 0.41  PASS
+  gf2x_ct_select           |t| = 0.78  PASS
+  gf2x_inv                 |t| = 0.23  PASS
+  gf2x_scatter             |t| = 3.85  PASS
+  sample_tape              |t| = 0.08  PASS
+
+  Class definitions:
+    gf2x_mul_operand  A: weight-1 operand; B: dense operand (fixed
+                      multiplier).  Certifies the Karatsuba product and
+                      reduction time is independent of operand weight.
+    gf2x_rotl_amount  A: rotation amount k = 1; B: k = p - 1.  The barrel
+                      of fixed public rotations selected by the bits of k
+                      must not vary with k.
+    gf2x_ct_select    A: selector bit 0; B: bit 1, over a full ring of
+                      ichor_ct_select64 blends.  Guards against a compiler
+                      lowering the masked select back to a branch on the
+                      secret bit (the clang -O3 regression this helper
+                      exists to prevent).
+    gf2x_inv          A: the weight-1 unit a = 1; B: a dense odd-weight
+                      unit.  Both classes are units, so the invertibility
+                      check runs its full loop; the Itoh-Tsujii chain shape
+                      is fixed by the public p.
+    gf2x_scatter      A: support clustered at the low positions; B: the
+                      same weight spread across the ring.  Every output
+                      word and index is visited regardless of the support.
+    sample_tape       A: a fixed 0x5a reference tape; B: a fresh random
+                      tape each trial (lambda 256, w = 261, n = 86902).
+                      The overlay Fisher-Yates and Lemire reduction consume
+                      the tape at a fixed rate with no rejection loop.
+
+  Notes:
+    Clean run: all six targets pass at the 200000-sample release gate,
+    max real |t| = 3.85 (gf2x_scatter), under the 4.5 threshold.  Scatter
+    is the noisiest target: its O(words * w) double loop over the dense
+    output gives it a variant, run-to-run statistic (a re-measurement read
+    2.04), but the per-class means track to within 0.15% (337453 vs 337069
+    cycles) and it stays clear of threshold.  Gracemont shows the same
+    variance and interpretation (see that host's Run 3 note).
+
+    gf2x_inv exercises gf2x_equal only on the always-equal unit path (both
+    classes are units); the invertibility check's early-return branch
+    fires only on a non-unit resample and is not covered here (see
+    ../SECURITY_REVIEW_1_1_0.md, finding L-1).

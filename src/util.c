@@ -64,6 +64,29 @@ ichor_const_memcmp(const void *a, const void *b, size_t len)
 }
 
 /* ================================================================
+ * Constant-time selection
+ * ================================================================ */
+
+uint64_t
+ichor_ct_mask64(uint64_t bit)
+{
+    /*
+     * volatile forces the mask through an opaque access, so the compiler
+     * cannot prove the result is one of {0, ~0} and turn a dependent
+     * (a & mask) | (b & ~mask) blend into a secret-dependent branch.  Same
+     * technique as the volatile accumulator in ichor_const_memcmp.
+     */
+    volatile uint64_t m = (uint64_t)0 - (bit & 1u);
+    return m;
+}
+
+uint64_t
+ichor_ct_select64(uint64_t mask, uint64_t a, uint64_t b)
+{
+    return (a & mask) | (b & ~mask);
+}
+
+/* ================================================================
  * LSB-first bit packing
  *
  * The _le16 and _le32 variants differ only in the source/destination

@@ -36,7 +36,9 @@ set(DUDECT_SOURCES
     targets_aes.c
     targets_clmul.c
     targets_util.c
-    targets_grostl.c)
+    targets_grostl.c
+    targets_gf2x.c
+    targets_sample.c)
 
 add_executable(dudect ${DUDECT_SOURCES})
 target_include_directories(dudect PRIVATE

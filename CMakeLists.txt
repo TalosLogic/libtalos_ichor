@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 
 cmake_minimum_required(VERSION 3.16)
-project(libtalos_ichor VERSION 1.0.0 LANGUAGES C
+project(libtalos_ichor VERSION 1.1.0 LANGUAGES C
     DESCRIPTION "Shared constant-time symmetric primitives for the talos libraries")
 
 # include/ichor/version.h is the consumer-facing statement of the same
@@ -245,7 +245,9 @@ set(ICHOR_SOURCES
     src/grostl.c
     src/grostl_soft.c
     src/grostl_aesni.c
-    src/grostl_armv8.c)
+    src/grostl_armv8.c
+    src/gf2x.c
+    src/sample.c)
 
 add_library(ichor STATIC ${ICHOR_SOURCES})
 set_target_properties(ichor PROPERTIES
@@ -348,7 +350,9 @@ if(ICHOR_BUILD_SOFT_LIB)
         src/hirose.c
         src/aesdm.c
         src/grostl.c
-        src/grostl_soft.c)
+        src/grostl_soft.c
+        src/gf2x.c
+        src/sample.c)
     add_library(ichor_soft STATIC ${ICHOR_SOFT_SOURCES})
     set_target_properties(ichor_soft PROPERTIES
         OUTPUT_NAME talos_ichor_soft

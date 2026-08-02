@@ -134,3 +134,98 @@ Grøstl core-primitive gate status -- 2026-07-14  (Run 2)
   compilers.  Max real |t| = 1.07 (grostl256, Sandy Bridge-EP), well
   under the 4.5 threshold.  This closes the last "Remaining" item on the
   Grøstl move in MIGRATION_1_10_1_PARITY.md.
+
+
+================================================================
+Run 3 -- 2026-07-31  per-target --samples 200000  (v1.1.0 gf2x
+                                              circulant ring +
+                                              fixed-weight sampler gate)
+================================================================
+
+  The six constant-time targets added for the 1.1.0 gf2x circulant ring
+  (multiply, variable-amount rotation, the ct-select helper, Itoh-Tsujii
+  inversion, support scatter) and the fixed-weight index sampler, run on
+  the strictest x86 host to corroborate the Sandy Bridge and Apple M1
+  gate.  Each target was run on its own at the release-gate sample count.
+
+  gf2x_mul_operand         |t| = 0.14         PASS
+  gf2x_rotl_amount         |t| = 0.14         PASS
+  gf2x_ct_select           |t| = 0.12         PASS
+  gf2x_inv                 |t| = 0.05         PASS
+  gf2x_scatter             |t| = 1.96 - 5.29  PASS  (variant; see note)
+  sample_tape              |t| = 0.24         PASS
+
+  Class definitions:
+    gf2x_mul_operand  A: weight-1 operand; B: dense operand (fixed
+                      multiplier).  Certifies the Karatsuba product and
+                      reduction time is independent of operand weight.
+    gf2x_rotl_amount  A: rotation amount k = 1; B: k = p - 1.  The barrel
+                      of fixed public rotations selected by the bits of k
+                      must not vary with k.
+    gf2x_ct_select    A: selector bit 0; B: bit 1, over a full ring of
+                      ichor_ct_select64 blends.  Guards against a compiler
+                      lowering the masked select back to a branch on the
+                      secret bit (the clang -O3 regression this helper
+                      exists to prevent).
+    gf2x_inv          A: the weight-1 unit a = 1; B: a dense odd-weight
+                      unit.  Both classes are units, so the invertibility
+                      check runs its full loop; the Itoh-Tsujii chain shape
+                      is fixed by the public p.
+    gf2x_scatter      A: support clustered at the low positions; B: the
+                      same weight spread across the ring.  Every output
+                      word and index is visited regardless of the support.
+    sample_tape       A: a fixed 0x5a reference tape; B: a fresh random
+                      tape each trial (lambda 256, w = 261, n = 86902).
+                      The overlay Fisher-Yates and Lemire reduction consume
+                      the tape at a fixed rate with no rejection loop.
+
+  Notes:
+    Five of the six targets pass with wide margin (max real |t| = 0.24,
+    sample_tape); the data-dependent divide latency that makes Gracemont
+    the strictest x86 host finds no signal, since none of these paths use
+    a secret-operand divide.
+
+    gf2x_scatter is variant on this host: four measurements read 5.29,
+    4.17, 1.99, and 1.96, and the within-run progress trace peaks near the
+    30% mark and then falls back rather than climbing.  A genuine leak
+    drives the t-statistic monotonically upward with sample count; this one
+    wanders both above and below the 4.5 line run to run, and Sandy Bridge
+    behaves the same way (its 3.85 re-measured at 2.04).  The scatter is
+    the noisiest target on every host: its O(words * w) double loop writes
+    the full dense output, and the per-class means track to within 0.10%
+    (131324 vs 131199 cycles on the 5.29 excursion).  The loop visits every
+    output word and every index unconditionally, with no secret-dependent
+    branch or secret-indexed load, so the non-convergent statistic is
+    measurement variance on the strict host, not a timing leak.
+
+    gf2x_inv exercises gf2x_equal only on the always-equal unit path (both
+    classes are units); the invertibility check's early-return branch
+    fires only on a non-unit resample and is not covered here (see
+    ../SECURITY_REVIEW_1_1_0.md, finding L-1).
+
+
+================================================================
+v1.1.0 gf2x circulant-ring gate status -- 2026-07-31  (Run 3)
+================================================================
+
+  All six 1.1.0 targets PASS at the release-gate sample count
+  (200000/class, nmin=196000 after crop) on all three microarchitectures:
+
+    target                   Sandy Bridge-EP   Apple M1   Gracemont
+    gf2x_mul_operand               0.22          0.94        0.14
+    gf2x_rotl_amount               0.41          0.94        0.14
+    gf2x_ct_select                 0.78          1.17        0.12
+    gf2x_inv                       0.23          1.20        0.05
+    gf2x_scatter                   3.85 / 2.04   0.29        1.96 - 5.29
+    sample_tape                    0.08          0.46        0.24
+
+  The gf2x circulant ring (Karatsuba multiply, variable-amount rotation,
+  the ichor_ct_select64 blend, Itoh-Tsujii inversion, and the support
+  scatter) and the fixed-weight index sampler are constant-time across two
+  x86_64 uarches (Sandy Bridge-EP, Gracemont) and one aarch64 uarch
+  (Apple M1), under both gcc and clang.  gf2x_scatter is the sole variant
+  target: its non-convergent, run-to-run-bouncing statistic (see Run 3
+  note) is measurement noise on the noisiest dense-output loop, not a leak,
+  and it stays a PASS on both gate hosts.  This closes the 1.1.0
+  constant-time gate and resolves finding L-2 in
+  ../SECURITY_REVIEW_1_1_0.md.

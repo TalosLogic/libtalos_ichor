@@ -35,14 +35,32 @@ extern const dudect_target_t target_clmul64_scalar_a;
 extern const dudect_target_t target_const_memcmp;
 extern const dudect_target_t target_grostl256_input;
 extern const dudect_target_t target_grostl512_input;
+extern const dudect_target_t target_gf2x_mul_operand;
+extern const dudect_target_t target_gf2x_rotl_amount;
+extern const dudect_target_t target_gf2x_ct_select;
+extern const dudect_target_t target_gf2x_inv;
+extern const dudect_target_t target_gf2x_scatter;
+extern const dudect_target_t target_sample_tape;
 
 static const dudect_target_t *const target_registry[] = {
-    &target_sentinel_leak,        &target_sentinel_clean,
-    &target_aes_ct64_encrypt_key, &target_aes_ct64_encrypt_x4_key,
-    &target_aes_ct64_encrypt_pt,  &target_aes_ct64_encrypt_x4_pt,
-    &target_clmul64_scalar_b,     &target_clmul64_scalar_a,
-    &target_const_memcmp,         &target_grostl256_input,
-    &target_grostl512_input,      NULL,
+    &target_sentinel_leak,
+    &target_sentinel_clean,
+    &target_aes_ct64_encrypt_key,
+    &target_aes_ct64_encrypt_x4_key,
+    &target_aes_ct64_encrypt_pt,
+    &target_aes_ct64_encrypt_x4_pt,
+    &target_clmul64_scalar_b,
+    &target_clmul64_scalar_a,
+    &target_const_memcmp,
+    &target_grostl256_input,
+    &target_grostl512_input,
+    &target_gf2x_mul_operand,
+    &target_gf2x_rotl_amount,
+    &target_gf2x_ct_select,
+    &target_gf2x_inv,
+    &target_gf2x_scatter,
+    &target_sample_tape,
+    NULL,
 };
 
 static volatile sig_atomic_t g_stop = 0;
