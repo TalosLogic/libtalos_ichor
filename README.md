@@ -20,7 +20,7 @@ one clean-room, constant-time place instead of duplicated per repo.
 | `<ichor/hirose.h>`  | Hirose double-block-length compression over AES-256 (256-bit output). |
 | `<ichor/gf2x.h>`    | Constant-time circulant arithmetic over F_2[x]/(x^p - 1) (multiply, rotate, invert) for QC-MDPC codes; the shared ring beneath libtalos_syndrome and libtalos_voleith. |
 | `<ichor/sample.h>`  | Constant-time fixed-weight index sampling from a caller-supplied random tape: `ichor_sample_fixed_weight` draws `w` distinct indices in `[0, n)` in draw order (a pure function of the tape, fixed consumption) via overlay Fisher-Yates + widened Lemire reduction; `ichor_sample_sort_ascending` canonicalizes a drawn support to ascending order with a constant-time bitonic network. The shared support sampler for fixed-weight errors. |
-| `<ichor/cpu.h>`     | Runtime CPU feature detection (cached bitmask) feeding the dispatch tables. |
+| `<ichor/cpu.h>`     | Runtime CPU feature detection (cached bitmask) feeding the dispatch tables. Covers the backends ichor dispatches on (AES-NI, CLMUL, SSSE3/SSE4.1, ARMv8 AES/PMULL) and, for consumers that run their own 256-bit-vector dispatch, OS-gated AVX / AVX2 / FMA detection. |
 | `<ichor/backend.h>` | Query which backend each primitive selected, and whether it is optimal for this CPU or a software fallback (see [CPU dispatch](#cpu-dispatch)). |
 | `<ichor/util.h>`    | `ichor_secure_zero` (non-elidable wipe), `ichor_const_memcmp` (constant-time compare), and `ichor_ct_mask64` / `ichor_ct_select64` (opaque constant-time select). |
 
@@ -60,6 +60,17 @@ The `ICHOR_FORCE_BACKEND` environment override (e.g. `aes:bitsliced` to pin the
 software AES path) exists only to exercise the fallbacks on accelerated
 hardware. It is a **test-only** facility, compiled in only for first-party /
 test / dudect builds and absent from a release or vendored build.
+
+### Detection-only features (AVX / AVX2 / FMA)
+
+`ichor_cpu_features()` also reports `ICHOR_CPU_AVX`, `ICHOR_CPU_AVX2`, and
+`ICHOR_CPU_FMA`. ichor's own primitives do not use 256-bit vectors, so these do
+not steer any ichor dispatch; they are exposed so a consumer that runs its own
+256-bit-vector kernels can drive its tier selection from the same probed, cached
+feature word rather than duplicating CPUID logic. Each is **OS-gated**: the bit is
+set only when the CPU advertises the feature *and* the OS has enabled AVX state
+(OSXSAVE with `XCR0[2:1] == 0b11`), so a consumer that sees the bit may issue the
+instruction without a first-use fault. FMA shares the AVX YMM-state requirement.
 
 ## Thread safety
 

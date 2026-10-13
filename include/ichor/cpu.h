@@ -25,12 +25,22 @@
  * reserved for x86_64 features; bits 16-31 for aarch64 features.
  * ======================================================================== */
 
-#define ICHOR_CPU_AES_NI (1u << 0)     /* x86_64: CPUID.01H:ECX[25] */
-#define ICHOR_CPU_CLMUL (1u << 1)      /* x86_64: CPUID.01H:ECX[1]  */
-#define ICHOR_CPU_SSE41 (1u << 2)      /* x86_64: CPUID.01H:ECX[19] */
-#define ICHOR_CPU_SSSE3 (1u << 3)      /* x86_64: CPUID.01H:ECX[9]  */
-#define ICHOR_CPU_ARMV8_AES (1u << 16) /* aarch64: HWCAP_AES        */
-#define ICHOR_CPU_PMULL (1u << 17)     /* aarch64: HWCAP_PMULL      */
+#define ICHOR_CPU_AES_NI (1u << 0) /* x86_64: CPUID.01H:ECX[25]      */
+#define ICHOR_CPU_CLMUL (1u << 1)  /* x86_64: CPUID.01H:ECX[1]       */
+#define ICHOR_CPU_SSE41 (1u << 2)  /* x86_64: CPUID.01H:ECX[19]      */
+#define ICHOR_CPU_SSSE3 (1u << 3)  /* x86_64: CPUID.01H:ECX[9]       */
+/*
+ * The 256-bit-vector features below are reported only when the OS has also
+ * enabled AVX state (OSXSAVE plus XCR0[2:1] == 0b11); a CPU that supports AVX
+ * under an OS that has not enabled YMM save/restore is reported as lacking it,
+ * because the first AVX instruction would otherwise fault.  FMA operates on YMM
+ * and carries the same OS-state requirement.
+ */
+#define ICHOR_CPU_AVX (1u << 4)        /* x86_64: CPUID.01H:ECX[28], OS-gated */
+#define ICHOR_CPU_FMA (1u << 5)        /* x86_64: CPUID.01H:ECX[12], OS-gated */
+#define ICHOR_CPU_AVX2 (1u << 6)       /* x86_64: CPUID.07H:EBX[5],  OS-gated */
+#define ICHOR_CPU_ARMV8_AES (1u << 16) /* aarch64: HWCAP_AES             */
+#define ICHOR_CPU_PMULL (1u << 17)     /* aarch64: HWCAP_PMULL           */
 
 /* ========================================================================
  * API

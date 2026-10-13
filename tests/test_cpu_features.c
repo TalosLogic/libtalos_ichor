@@ -63,61 +63,78 @@ test_stable(void)
 }
 
 /* ========================================================================
- * Test: x86_64 cross-check against __builtin_cpu_supports
+ * Test: cross-check the probe against an independent reference
+ *
+ * Each check reports the observed state on BOTH sides (probe vs reference) so
+ * a reader can see why a line passed: agreement that a feature is ABSENT is a
+ * validated result exactly as much as agreement that it is present. Without the
+ * printed state, a PASS on a machine lacking (say) AVX2 looks like it asserted
+ * nothing. The reference is the compiler's own view: on x86 that is
+ * __builtin_cpu_supports (which needs a string literal, so the caller evaluates
+ * it and passes the int), and it already reflects OS-enabled AVX state, so it
+ * validates the probe's OSXSAVE + XGETBV gate, not just the raw CPUID bit.
  * ======================================================================== */
+
+#if defined(__x86_64__) || defined(_M_X64) ||                                  \
+    (defined(__aarch64__) && defined(__linux__))
+
+static void
+check_feature(const char *label, int probe, int reference)
+{
+    tests_run++;
+    printf("  [%2d] %-34s probe=%-7s ref=%-7s ", tests_run, label,
+           probe ? "present" : "absent", reference ? "present" : "absent");
+    if (probe == (reference != 0)) {
+        tests_passed++;
+        printf("PASS\n");
+    } else {
+        printf("FAIL: probe disagrees with reference\n");
+    }
+}
+
+#endif /* any arch with a cross-check reference */
 
 #if defined(__x86_64__) || defined(_M_X64)
 
 static void
-test_x86_aesni(void)
+test_x86_features(void)
 {
-    TEST("x86_64: ICHOR_CPU_AES_NI matches __builtin_cpu_supports(aes)");
-    uint32_t mask = ichor_cpu_features();
-    int builtin_aes = __builtin_cpu_supports("aes");
-    int our_aes = (mask & ICHOR_CPU_AES_NI) != 0;
-    if (our_aes == (builtin_aes != 0))
-        PASS();
-    else
-        FAIL("AES-NI mismatch with compiler builtin");
+    uint32_t m = ichor_cpu_features();
+
+    check_feature("AES_NI vs builtin(aes)", (m & ICHOR_CPU_AES_NI) != 0,
+                  __builtin_cpu_supports("aes"));
+    check_feature("CLMUL vs builtin(pclmul)", (m & ICHOR_CPU_CLMUL) != 0,
+                  __builtin_cpu_supports("pclmul"));
+    check_feature("SSSE3 vs builtin(ssse3)", (m & ICHOR_CPU_SSSE3) != 0,
+                  __builtin_cpu_supports("ssse3"));
+    check_feature("SSE41 vs builtin(sse4.1)", (m & ICHOR_CPU_SSE41) != 0,
+                  __builtin_cpu_supports("sse4.1"));
+    check_feature("AVX vs builtin(avx)", (m & ICHOR_CPU_AVX) != 0,
+                  __builtin_cpu_supports("avx"));
+    check_feature("AVX2 vs builtin(avx2)", (m & ICHOR_CPU_AVX2) != 0,
+                  __builtin_cpu_supports("avx2"));
+    check_feature("FMA vs builtin(fma)", (m & ICHOR_CPU_FMA) != 0,
+                  __builtin_cpu_supports("fma"));
 }
 
+/*
+ * The three OS-gated bits imply one another on real hardware: AVX2 and FMA are
+ * defined only on cores that also carry AVX, so neither may be reported without
+ * AVX.  (AVX without AVX2/FMA is legitimate: the dev-box Sandy Bridge tier.)
+ */
 static void
-test_x86_clmul(void)
+test_x86_avx_implications(void)
 {
-    TEST("x86_64: ICHOR_CPU_CLMUL matches __builtin_cpu_supports(pclmul)");
+    TEST("x86_64: AVX2 and FMA each imply AVX");
     uint32_t mask = ichor_cpu_features();
-    int builtin = __builtin_cpu_supports("pclmul");
-    int ours = (mask & ICHOR_CPU_CLMUL) != 0;
-    if (ours == (builtin != 0))
+    int avx = (mask & ICHOR_CPU_AVX) != 0;
+    int avx2 = (mask & ICHOR_CPU_AVX2) != 0;
+    int fma = (mask & ICHOR_CPU_FMA) != 0;
+    printf("[avx=%d avx2=%d fma=%d] ", avx, avx2, fma);
+    if ((!avx2 || avx) && (!fma || avx))
         PASS();
     else
-        FAIL("CLMUL mismatch with compiler builtin");
-}
-
-static void
-test_x86_ssse3(void)
-{
-    TEST("x86_64: ICHOR_CPU_SSSE3 matches __builtin_cpu_supports(ssse3)");
-    uint32_t mask = ichor_cpu_features();
-    int builtin = __builtin_cpu_supports("ssse3");
-    int ours = (mask & ICHOR_CPU_SSSE3) != 0;
-    if (ours == (builtin != 0))
-        PASS();
-    else
-        FAIL("SSSE3 mismatch with compiler builtin");
-}
-
-static void
-test_x86_sse41(void)
-{
-    TEST("x86_64: ICHOR_CPU_SSE41 matches __builtin_cpu_supports(sse4.1)");
-    uint32_t mask = ichor_cpu_features();
-    int builtin = __builtin_cpu_supports("sse4.1");
-    int ours = (mask & ICHOR_CPU_SSE41) != 0;
-    if (ours == (builtin != 0))
-        PASS();
-    else
-        FAIL("SSE4.1 mismatch with compiler builtin");
+        FAIL("AVX2 or FMA reported without AVX");
 }
 
 #endif /* x86_64 */
@@ -129,31 +146,15 @@ test_x86_sse41(void)
 #if defined(__aarch64__) && defined(__linux__)
 
 static void
-test_aarch64_aes(void)
+test_aarch64_features(void)
 {
-    TEST("aarch64: ICHOR_CPU_ARMV8_AES matches getauxval(AT_HWCAP)");
-    uint32_t mask = ichor_cpu_features();
+    uint32_t m = ichor_cpu_features();
     uint64_t hwcap = getauxval(AT_HWCAP);
-    int our_aes = (mask & ICHOR_CPU_ARMV8_AES) != 0;
-    int hwcap_aes = (hwcap & HWCAP_AES) != 0;
-    if (our_aes == hwcap_aes)
-        PASS();
-    else
-        FAIL("ARMV8_AES mismatch with getauxval");
-}
 
-static void
-test_aarch64_pmull(void)
-{
-    TEST("aarch64: ICHOR_CPU_PMULL matches getauxval(AT_HWCAP)");
-    uint32_t mask = ichor_cpu_features();
-    uint64_t hwcap = getauxval(AT_HWCAP);
-    int our_pmull = (mask & ICHOR_CPU_PMULL) != 0;
-    int hwcap_pmull = (hwcap & HWCAP_PMULL) != 0;
-    if (our_pmull == hwcap_pmull)
-        PASS();
-    else
-        FAIL("PMULL mismatch with getauxval");
+    check_feature("ARMV8_AES vs hwcap(AES)", (m & ICHOR_CPU_ARMV8_AES) != 0,
+                  (hwcap & HWCAP_AES) != 0);
+    check_feature("PMULL vs hwcap(PMULL)", (m & ICHOR_CPU_PMULL) != 0,
+                  (hwcap & HWCAP_PMULL) != 0);
 }
 
 #endif /* aarch64 Linux */
@@ -208,8 +209,9 @@ test_no_cross_arch_bits(void)
         PASS();
 #elif defined(__aarch64__)
     /* On aarch64, x86_64 bits must be clear. */
-    if (mask & (ICHOR_CPU_AES_NI | ICHOR_CPU_CLMUL | ICHOR_CPU_SSE41 |
-                ICHOR_CPU_SSSE3))
+    if (mask &
+        (ICHOR_CPU_AES_NI | ICHOR_CPU_CLMUL | ICHOR_CPU_SSE41 |
+         ICHOR_CPU_SSSE3 | ICHOR_CPU_AVX | ICHOR_CPU_FMA | ICHOR_CPU_AVX2))
         FAIL("x86_64 bits set on aarch64 host");
     else
         PASS();
@@ -235,15 +237,12 @@ main(void)
     test_no_cross_arch_bits();
 
 #if defined(__x86_64__) || defined(_M_X64)
-    test_x86_aesni();
-    test_x86_clmul();
-    test_x86_ssse3();
-    test_x86_sse41();
+    test_x86_features();
+    test_x86_avx_implications();
 #endif
 
 #if defined(__aarch64__) && defined(__linux__)
-    test_aarch64_aes();
-    test_aarch64_pmull();
+    test_aarch64_features();
 #endif
 
     test_override_zero();

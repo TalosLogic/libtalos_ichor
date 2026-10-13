@@ -5,6 +5,19 @@ All notable changes to libtalos_ichor are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 1.2.0
+
+### Added
+
+- `<ichor/cpu.h>`: OS-gated AVX / AVX2 / FMA detection (`ICHOR_CPU_AVX`,
+  `ICHOR_CPU_AVX2`, `ICHOR_CPU_FMA`) in the `ichor_cpu_features()` bitmask. These
+  256-bit-vector features steer no ichor dispatch (ichor's own primitives do not
+  use them); they are reported so a consumer running its own 256-bit kernels can
+  drive tier selection from the same cached feature word. Each bit is set only
+  when the CPU advertises the feature and the OS has enabled AVX state (OSXSAVE,
+  `XCR0[2:1] == 0b11`), so seeing the bit means the instruction is safe to issue
+  (#24).
+
 ## 1.1.0
 
 ### Added
