@@ -65,10 +65,25 @@ ichor_cpu_probe(void)
         }
     }
 
-    /* AVX2 lives in the leaf-7 feature set and shares the AVX OS-state gate. */
-    if (os_avx && __get_cpuid_count(7, 0, &eax, &ebx, &ecx, &edx)) {
-        if (ebx & (1u << 5))
-            mask |= ICHOR_CPU_AVX2;
+    /*
+     * Leaf-7 feature set.  GFNI is reported on the CPUID bit alone: its 128-bit
+     * (legacy-SSE) form operates on XMM, whose state is always enabled, so it
+     * needs no AVX OS-state gate; a consumer issuing the 256-bit GFNI form gates
+     * additionally on AVX2.  AVX2, VAES, and VPCLMULQDQ operate on YMM, so they
+     * share the AVX OS-state gate (the 256-bit VAES encrypt path also uses AVX2
+     * broadcasts).
+     */
+    if (__get_cpuid_count(7, 0, &eax, &ebx, &ecx, &edx)) {
+        if (ecx & (1u << 8))
+            mask |= ICHOR_CPU_GFNI;
+        if (os_avx) {
+            if (ebx & (1u << 5))
+                mask |= ICHOR_CPU_AVX2;
+            if (ecx & (1u << 9))
+                mask |= ICHOR_CPU_VAES;
+            if (ecx & (1u << 10))
+                mask |= ICHOR_CPU_VPCLMULQDQ;
+        }
     }
 
     return mask;

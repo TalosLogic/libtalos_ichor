@@ -43,6 +43,8 @@ typedef enum {
 ichor_backend_health_t ichor_aes_backend_health(void);
 ichor_backend_health_t ichor_clmul_backend_health(void);
 ichor_backend_health_t ichor_grostl_backend_health(void);
+ichor_backend_health_t ichor_gf256_backend_health(void);
+ichor_backend_health_t ichor_gf16_backend_health(void);
 
 /*
  * Aggregate report for all three primitives, for a single start-up call.
@@ -51,6 +53,8 @@ typedef struct {
     ichor_backend_health_t aes;    /* AES block cipher */
     ichor_backend_health_t clmul;  /* carry-less multiply (GF(2^k)) */
     ichor_backend_health_t grostl; /* Grøstl permutation */
+    ichor_backend_health_t gf256;  /* GF(2^8) region multiply */
+    ichor_backend_health_t gf16;   /* GF(2^16) region multiply */
 } ichor_backend_report_t;
 
 /*

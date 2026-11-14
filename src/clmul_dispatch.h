@@ -23,6 +23,8 @@
 
 typedef struct {
     void (*mul)(uint64_t, uint64_t, uint64_t *, uint64_t *);
+    void (*mul_x2)(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t[2],
+                   uint64_t[2]);
     ichor_clmul_backend_t backend_tag;
     const char *name;
 } ichor_clmul_ops_t;

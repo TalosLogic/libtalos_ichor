@@ -52,8 +52,8 @@ test_force_bitsliced(void)
     TEST("override(no-HW) dispatches to bitsliced backend");
 
     uint32_t host = ichor_cpu_features();
-    ichor_cpu_features_override(host &
-                                ~(ICHOR_CPU_AES_NI | ICHOR_CPU_ARMV8_AES));
+    ichor_cpu_features_override(
+        host & ~(ICHOR_CPU_AES_NI | ICHOR_CPU_ARMV8_AES | ICHOR_CPU_VAES));
     ichor_aes_dispatch_reset();
 
     /* Trigger init by calling a public entry point. */

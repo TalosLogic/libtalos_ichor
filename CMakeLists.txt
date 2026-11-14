@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 
 cmake_minimum_required(VERSION 3.16)
-project(libtalos_ichor VERSION 1.1.0 LANGUAGES C
+project(libtalos_ichor VERSION 1.3.0 LANGUAGES C
     DESCRIPTION "Shared constant-time symmetric primitives for the talos libraries")
 
 # include/ichor/version.h is the consumer-facing statement of the same
@@ -27,11 +27,26 @@ set(CMAKE_C_EXTENSIONS OFF)
 # Build options.  Omit a hardware backend for a lean / portable-only build;
 # the constant-time bitsliced AES fallback is always compiled in.
 option(ICHOR_AES_NI    "Compile the AES-NI backend (x86_64)"  ON)
+option(ICHOR_AES_VAES  "Compile the VAES batched AES backend (x86_64; needs AES-NI)" ON)
+option(ICHOR_AES_PREFER_VAES "Prefer VAES over AES-NI in auto-dispatch when both are present; turn OFF for split-256 (e.g. Gracemont) fleets where AES-NI is faster" ON)
+option(ICHOR_GROSTL_AVX2 "Compile the AVX2 (P+Q widened) Groestl backend (x86_64; needs AES-NI)" ON)
+option(ICHOR_GROSTL_AVX2_GFNI "Compile the AVX2+GFNI Groestl backend (x86_64)" ON)
 option(ICHOR_ARMV8_AES "Compile the ARMv8 AES backend (aarch64)" ON)
 option(ICHOR_CLMUL     "Compile the PCLMULQDQ carry-less mul backend (x86_64)" ON)
 option(ICHOR_PMULL     "Compile the PMULL carry-less mul backend (aarch64)" ON)
+option(ICHOR_GF256_SSSE3 "Compile the SSSE3 GF(2^8) region-multiply backend (x86_64)" ON)
+option(ICHOR_GF256_AVX2 "Compile the AVX2 GF(2^8) region-multiply backend (x86_64)" ON)
+option(ICHOR_GF256_GFNI "Compile the GFNI GF2P8MULB GF(2^8) region-multiply backend (x86_64; needs AVX2)" ON)
+option(ICHOR_GF16_SSSE3 "Compile the SSSE3 GF(2^16) region-multiply backend (x86_64)" ON)
+option(ICHOR_GF16_GFNI "Compile the GFNI affine GF(2^16) region-multiply backend (x86_64; needs AVX2)" ON)
+option(ICHOR_GF256_NEON "Compile the NEON TBL GF(2^8) region-multiply backend (aarch64)" ON)
+option(ICHOR_GF16_NEON "Compile the NEON TBL GF(2^16) region-multiply backend (aarch64)" ON)
+option(ICHOR_KECCAK_X4_AVX2 "Compile the AVX2 4-way Keccak-f[1600] backend (x86_64)" ON)
+option(ICHOR_KECCAK_SHA3 "Compile the ARMv8.2 SHA-3 single-sponge Keccak-f[1600] backend (aarch64)" ON)
+option(ICHOR_THREADS "Build the ichor thread pool (POSIX threads); OFF compiles a serial fallback" ON)
 option(ICHOR_BUILD_TESTS "Build the test suite" ON)
 option(ICHOR_BUILD_DUDECT "Build the dudect timing-validation harness (tools/dudect)" OFF)
+option(ICHOR_BUILD_BENCH "Build the micro-benchmark harness (tools/bench); run manually" OFF)
 
 add_compile_options(-Wall -Wextra -Wpedantic -Wno-unused-parameter)
 
@@ -126,6 +141,72 @@ if(ICHOR_AES_NI)
 endif()
 
 #
+# VAES probe (x86_64).  The batched backend reuses the AES-NI key schedule and
+# single-block path, so it is only probed when AES-NI compiled; HAVE_AES_VAES
+# is set only where the 256-bit vaesenc intrinsic and the AVX2 round-key
+# broadcast both compile, so the -mvaes -mavx2 flags below are never emitted on
+# a toolchain that lacks them.
+#
+if(ICHOR_AES_VAES AND HAVE_AES_NI)
+    include(CheckCSourceCompiles)
+    set(CMAKE_REQUIRED_FLAGS "-mvaes -mavx2")
+    check_c_source_compiles("
+        #include <immintrin.h>
+        int main(void) {
+            __m256i a = _mm256_setzero_si256();
+            __m128i k = _mm_setzero_si128();
+            __m256i r = _mm256_broadcastsi128_si256(k);
+            r = _mm256_aesenc_epi128(a, r);
+            r = _mm256_aesenclast_epi128(r, r);
+            return _mm_cvtsi128_si32(_mm256_castsi256_si128(r));
+        }
+    " HAVE_AES_VAES)
+    unset(CMAKE_REQUIRED_FLAGS)
+endif()
+
+#
+# AVX2 Groestl probe (x86_64).  Widens the P/Q permutations into YMM lanes; the
+# S-box uses aesenclast (AES-NI, 128-bit) split across the two halves, so this
+# backend needs AES-NI too.  HAVE_GROSTL_AVX2 is set only where the YMM integer
+# ops and aesenclast both compile.
+#
+if(ICHOR_GROSTL_AVX2 AND HAVE_AES_NI)
+    include(CheckCSourceCompiles)
+    set(CMAKE_REQUIRED_FLAGS "-mavx2 -maes")
+    check_c_source_compiles("
+        #include <immintrin.h>
+        int main(void) {
+            __m256i a = _mm256_set1_epi8(1);
+            __m128i s = _mm_aesenclast_si128(_mm256_castsi256_si128(a),
+                                             _mm_setzero_si128());
+            a = _mm256_shuffle_epi8(_mm256_set_m128i(s, s), a);
+            a = _mm256_xor_si256(a, _mm256_add_epi8(a, a));
+            return _mm_cvtsi128_si32(_mm256_castsi256_si128(a));
+        }
+    " HAVE_GROSTL_AVX2)
+    unset(CMAKE_REQUIRED_FLAGS)
+endif()
+
+#
+# AVX2+GFNI Groestl probe (x86_64).  The GFNI affine S-box needs no AES-NI.
+# HAVE_GROSTL_AVX2_GFNI is set only where GF2P8AFFINEINVQB on a YMM compiles.
+#
+if(ICHOR_GROSTL_AVX2_GFNI)
+    include(CheckCSourceCompiles)
+    set(CMAKE_REQUIRED_FLAGS "-mavx2 -mgfni")
+    check_c_source_compiles("
+        #include <immintrin.h>
+        int main(void) {
+            __m256i a = _mm256_set1_epi8(1);
+            __m256i m = _mm256_set1_epi64x((long long)0xF1E3C78F1F3E7CF8ULL);
+            a = _mm256_gf2p8affineinv_epi64_epi8(a, m, 0x63);
+            return _mm_cvtsi128_si32(_mm256_castsi256_si128(a));
+        }
+    " HAVE_GROSTL_AVX2_GFNI)
+    unset(CMAKE_REQUIRED_FLAGS)
+endif()
+
+#
 # ARMv8 Crypto Extension probe (aarch64).  Try without explicit flags
 # first (Apple Silicon / compilers that enable crypto by default); fall
 # back to -march=armv8-a+crypto (Linux GCC/Clang).
@@ -208,7 +289,190 @@ if(ICHOR_PMULL)
 endif()
 unset(_PMULL_SRC)
 
-if(HAVE_AES_NI)
+#
+# ARMv8.2 SHA-3 extension probe (aarch64) for the single-sponge Keccak-f[1600]
+# kernel (FEAT_SHA3: EOR3/RAX1/BCAX/XAR).  Try without explicit flags first
+# (Apple Silicon enables it by default), then -march=armv8.2-a+sha3.
+# HAVE_KECCAK_SHA3 is set only where the intrinsics compile, so the +sha3 flag
+# is never emitted on a non-aarch64 toolchain.
+#
+set(_SHA3_SRC "
+    #include <arm_neon.h>
+    int main(void) {
+        uint64x2_t a = vdupq_n_u64(1);
+        uint64x2_t b = veor3q_u64(a, a, a);
+        uint64x2_t c = vrax1q_u64(a, b);
+        uint64x2_t d = vbcaxq_u64(a, b, c);
+        uint64x2_t e = vxarq_u64(d, a, 1);
+        return (int)vgetq_lane_u64(e, 0);
+    }
+")
+if(ICHOR_KECCAK_SHA3)
+    include(CheckCSourceCompiles)
+    check_c_source_compiles("${_SHA3_SRC}" HAVE_SHA3_NO_FLAG)
+    if(HAVE_SHA3_NO_FLAG)
+        set(HAVE_KECCAK_SHA3 TRUE)
+        set(SHA3_FLAGS "")
+    else()
+        set(CMAKE_REQUIRED_FLAGS "-march=armv8.2-a+sha3")
+        check_c_source_compiles("${_SHA3_SRC}" HAVE_SHA3_WITH_FLAG)
+        unset(CMAKE_REQUIRED_FLAGS)
+        if(HAVE_SHA3_WITH_FLAG)
+            set(HAVE_KECCAK_SHA3 TRUE)
+            set(SHA3_FLAGS "-march=armv8.2-a+sha3")
+        endif()
+    endif()
+endif()
+unset(_SHA3_SRC)
+
+#
+# SSSE3 probe (x86_64) for the GF(2^8) split-nibble region multiply.
+# HAVE_GF256_SSSE3 is only set where the pshufb intrinsic compiles, so the
+# -mssse3 flag below is never emitted on a non-x86 toolchain.
+#
+if(ICHOR_GF256_SSSE3)
+    include(CheckCSourceCompiles)
+    set(CMAKE_REQUIRED_FLAGS "-mssse3 -msse2")
+    check_c_source_compiles("
+        #include <tmmintrin.h>
+        int main(void) {
+            __m128i t = _mm_setzero_si128();
+            __m128i v = _mm_setzero_si128();
+            __m128i r = _mm_shuffle_epi8(t, v);
+            return _mm_cvtsi128_si32(r);
+        }
+    " HAVE_GF256_SSSE3)
+    unset(CMAKE_REQUIRED_FLAGS)
+endif()
+
+#
+# SSSE3 probe (x86_64) for the GF(2^16) split-nibble region multiply.  Same
+# pshufb requirement as gf256, probed independently so either backend can be
+# disabled on its own.
+#
+if(ICHOR_GF16_SSSE3)
+    include(CheckCSourceCompiles)
+    set(CMAKE_REQUIRED_FLAGS "-mssse3 -msse2")
+    check_c_source_compiles("
+        #include <tmmintrin.h>
+        int main(void) {
+            __m128i t = _mm_setzero_si128();
+            __m128i v = _mm_setzero_si128();
+            __m128i r = _mm_shuffle_epi8(t, v);
+            return _mm_cvtsi128_si32(r);
+        }
+    " HAVE_GF16_SSSE3)
+    unset(CMAKE_REQUIRED_FLAGS)
+endif()
+
+#
+# AVX2 probe (x86_64) for the GF(2^8) split-nibble region multiply.
+# HAVE_GF256_AVX2 is set only where the 256-bit vpshufb intrinsic compiles, so
+# -mavx2 is never emitted on a non-x86 toolchain.  gf16 has no AVX2 vpshufb
+# backend: the 16-bit interleaved layout forces lane-crossing permutes whose
+# cost cancels the widening (measured a wash-to-regression vs SSSE3 on every
+# test host), so gf16 ships SSSE3 + GFNI only.
+#
+if(ICHOR_GF256_AVX2)
+    include(CheckCSourceCompiles)
+    set(CMAKE_REQUIRED_FLAGS "-mavx2 -mssse3 -msse2")
+    check_c_source_compiles("
+        #include <immintrin.h>
+        int main(void) {
+            __m256i t = _mm256_setzero_si256();
+            __m256i v = _mm256_setzero_si256();
+            __m256i r = _mm256_shuffle_epi8(t, v);
+            return _mm256_extract_epi32(r, 0);
+        }
+    " HAVE_GF256_AVX2)
+    unset(CMAKE_REQUIRED_FLAGS)
+endif()
+
+#
+# GFNI probe (x86_64) for the GF(2^8) GF2P8MULB and GF(2^16) affine region
+# multiply.  Both 256-bit forms are VEX AVX2 encodings, so the probe requires
+# -mgfni -mavx2 and both intrinsics compiling.  HAVE_GF256_GFNI needs
+# GF2P8MULB; HAVE_GF16_GFNI needs GF2P8AFFINEQB.
+#
+if(ICHOR_GF256_GFNI)
+    include(CheckCSourceCompiles)
+    set(CMAKE_REQUIRED_FLAGS "-mgfni -mavx2")
+    check_c_source_compiles("
+        #include <immintrin.h>
+        int main(void) {
+            __m256i a = _mm256_set1_epi8(2);
+            __m256i v = _mm256_setzero_si256();
+            __m256i r = _mm256_gf2p8mul_epi8(a, v);
+            return _mm256_extract_epi32(r, 0);
+        }
+    " HAVE_GF256_GFNI)
+    unset(CMAKE_REQUIRED_FLAGS)
+endif()
+if(ICHOR_GF16_GFNI)
+    include(CheckCSourceCompiles)
+    set(CMAKE_REQUIRED_FLAGS "-mgfni -mavx2")
+    check_c_source_compiles("
+        #include <immintrin.h>
+        int main(void) {
+            __m256i a = _mm256_set1_epi64x(1);
+            __m256i v = _mm256_setzero_si256();
+            __m256i r = _mm256_gf2p8affine_epi64_epi8(v, a, 0);
+            return _mm256_extract_epi32(r, 0);
+        }
+    " HAVE_GF16_GFNI)
+    unset(CMAKE_REQUIRED_FLAGS)
+endif()
+
+#
+# NEON TBL probe (aarch64) for the GF(2^8) / GF(2^16) split-nibble region
+# multiply.  Advanced SIMD is mandatory on ARMv8-A, so no arch flag is needed;
+# the probe only confirms the toolchain is aarch64 and the table-lookup +
+# deinterleave intrinsics compile, so neither backend is emitted on a non-NEON
+# toolchain.  One probe gates both HAVE_GF256_NEON and HAVE_GF16_NEON.
+#
+if(ICHOR_GF256_NEON OR ICHOR_GF16_NEON)
+    include(CheckCSourceCompiles)
+    check_c_source_compiles("
+        #include <arm_neon.h>
+        int main(void) {
+            uint8x16_t t = vdupq_n_u8(0);
+            uint8x16_t v = vqtbl1q_u8(t, t);
+            uint8x16x2_t w = vld2q_u8((const unsigned char[32]){0});
+            v = veorq_u8(v, w.val[0]);
+            return (int)vgetq_lane_u8(v, 0);
+        }
+    " HAVE_GF_NEON)
+endif()
+if(ICHOR_GF256_NEON AND HAVE_GF_NEON)
+    set(HAVE_GF256_NEON TRUE)
+endif()
+if(ICHOR_GF16_NEON AND HAVE_GF_NEON)
+    set(HAVE_GF16_NEON TRUE)
+endif()
+
+#
+# AVX2 probe (x86_64) for the 4-way Keccak-f[1600] permutation.  The kernel
+# needs the AVX2 64-bit variable shifts and VPANDN; HAVE_KECCAK_X4_AVX2 is set
+# only where they compile, so -mavx2 is never emitted on a non-x86 toolchain.
+#
+if(ICHOR_KECCAK_X4_AVX2)
+    include(CheckCSourceCompiles)
+    set(CMAKE_REQUIRED_FLAGS "-mavx2")
+    check_c_source_compiles("
+        #include <immintrin.h>
+        int main(void) {
+            __m256i a = _mm256_set1_epi64x(1);
+            __m256i b = _mm256_sll_epi64(a, _mm_cvtsi32_si128(3));
+            __m256i c = _mm256_andnot_si256(a, b);
+            return _mm256_extract_epi32(c, 0);
+        }
+    " HAVE_KECCAK_X4_AVX2)
+    unset(CMAKE_REQUIRED_FLAGS)
+endif()
+
+if(HAVE_AES_VAES)
+    message(STATUS "ichor: AES backend = VAES batched + AES-NI (x86_64 hardware) + bitsliced fallback")
+elseif(HAVE_AES_NI)
     message(STATUS "ichor: AES backend = AES-NI (x86_64 hardware) + bitsliced fallback")
 elseif(HAVE_ARMV8_AES)
     message(STATUS "ichor: AES backend = ARMv8 Crypto (aarch64 hardware) + bitsliced fallback")
@@ -224,6 +488,48 @@ else()
     message(STATUS "ichor: clmul backend = scalar software only (constant-time)")
 endif()
 
+if(HAVE_GF256_GFNI)
+    message(STATUS "ichor: gf256 backend = GFNI GF2P8MULB + AVX2/SSSE3 vpshufb (x86_64 hardware) + scalar fallback")
+elseif(HAVE_GF256_AVX2)
+    message(STATUS "ichor: gf256 backend = AVX2 + SSSE3 split-nibble vpshufb (x86_64 hardware) + scalar fallback")
+elseif(HAVE_GF256_SSSE3)
+    message(STATUS "ichor: gf256 backend = SSSE3 split-nibble vpshufb (x86_64 hardware) + scalar fallback")
+elseif(HAVE_GF256_NEON)
+    message(STATUS "ichor: gf256 backend = NEON TBL split-nibble (aarch64 hardware) + scalar fallback")
+else()
+    message(STATUS "ichor: gf256 backend = scalar software only (constant-time)")
+endif()
+
+if(HAVE_GF16_GFNI)
+    message(STATUS "ichor: gf16 backend = GFNI affine + SSSE3 vpshufb (x86_64 hardware) + scalar fallback")
+elseif(HAVE_GF16_SSSE3)
+    message(STATUS "ichor: gf16 backend = SSSE3 split-nibble vpshufb (x86_64 hardware) + scalar fallback")
+elseif(HAVE_GF16_NEON)
+    message(STATUS "ichor: gf16 backend = NEON TBL split-nibble (aarch64 hardware) + scalar fallback")
+else()
+    message(STATUS "ichor: gf16 backend = scalar software only (constant-time)")
+endif()
+
+if(HAVE_GROSTL_AVX2_GFNI)
+    message(STATUS "ichor: Groestl SIMD = AVX2+GFNI (P+Q widened) + AVX2 + AES-NI + bitsliced fallback")
+elseif(HAVE_GROSTL_AVX2)
+    message(STATUS "ichor: Groestl SIMD = AVX2 (P+Q widened) + AES-NI + bitsliced fallback")
+endif()
+
+if(HAVE_KECCAK_X4_AVX2)
+    message(STATUS "ichor: Keccak x4 backend = AVX2 4-lane Keccak-f[1600] + scalar fallback")
+elseif(HAVE_KECCAK_SHA3)
+    message(STATUS "ichor: Keccak x4 backend = ARMv8.2 SHA-3 2x2-lane Keccak-f[1600] + scalar fallback")
+else()
+    message(STATUS "ichor: Keccak x4 backend = scalar 4x serial (portable software)")
+endif()
+
+if(HAVE_KECCAK_SHA3)
+    message(STATUS "ichor: Keccak single-sponge backend = ARMv8.2 SHA-3 (aarch64 hardware) + scalar fallback")
+else()
+    message(STATUS "ichor: Keccak single-sponge backend = scalar (portable software)")
+endif()
+
 set(ICHOR_SOURCES
     src/util.c
     src/cpu.c
@@ -233,21 +539,38 @@ set(ICHOR_SOURCES
     src/aes.c
     src/backend.c
     src/aes_aesni.c
+    src/aes_vaes.c
     src/aes_armv8.c
     src/aes_ct64.c
     src/aes_ct64_ops.c
     src/clmul.c
     src/clmul_pclmul.c
     src/clmul_pmull.c
+    src/gf256.c
+    src/gf256_ssse3.c
+    src/gf256_avx2.c
+    src/gf256_gfni.c
+    src/gf256_neon.c
+    src/gf16.c
+    src/gf16_ssse3.c
+    src/gf16_gfni.c
+    src/gf16_neon.c
     src/hash.c
+    src/keccak_x4.c
+    src/keccak_x4_avx2.c
+    src/keccak_sha3_neon.c
+    src/keccak_x4_sha3_neon.c
     src/hirose.c
     src/aesdm.c
     src/grostl.c
     src/grostl_soft.c
     src/grostl_aesni.c
+    src/grostl_avx2.c
+    src/grostl_avx2_gfni.c
     src/grostl_armv8.c
     src/gf2x.c
-    src/sample.c)
+    src/sample.c
+    src/pool.c)
 
 add_library(ichor STATIC ${ICHOR_SOURCES})
 set_target_properties(ichor PROPERTIES
@@ -257,6 +580,19 @@ set_target_properties(ichor PROPERTIES
 # Compile-time memory hardening.  PRIVATE: these
 # govern how ichor's own objects are built and do not leak to consumers.
 target_compile_options(ichor PRIVATE ${ICHOR_HARDENING_COMPILE_OPTIONS})
+
+# Thread pool (src/pool.c).  ICHOR_WITH_THREADS is PUBLIC so consumers that
+# include <ichor/pool.h> compile against the same build (threaded vs serial)
+# and inherit the pthreads link transitively.  With ICHOR_THREADS=OFF no
+# threading library is linked anywhere and pool.c compiles its serial
+# fallback, which doubles as the deterministic analysis build (dudect/ASan).
+if(ICHOR_THREADS)
+    find_package(Threads REQUIRED)
+    target_link_libraries(ichor PUBLIC Threads::Threads)
+    target_compile_definitions(ichor PUBLIC ICHOR_WITH_THREADS=1)
+else()
+    target_compile_definitions(ichor PUBLIC ICHOR_WITH_THREADS=0)
+endif()
 
 # Test-only hooks.  Two classes of hook that
 # exist purely to exercise the dispatch machinery from the test suite:
@@ -302,6 +638,27 @@ if(HAVE_AES_NI)
     set_source_files_properties(src/aes_aesni.c src/grostl_aesni.c PROPERTIES
         COMPILE_FLAGS "-maes -msse2 -mssse3")
 endif()
+if(HAVE_AES_VAES)
+    target_compile_definitions(ichor PUBLIC ICHOR_HAVE_AES_VAES)
+    set_source_files_properties(src/aes_vaes.c PROPERTIES
+        COMPILE_FLAGS "-mvaes -mavx2 -maes -msse2")
+    if(ICHOR_AES_PREFER_VAES)
+        target_compile_definitions(ichor PUBLIC ICHOR_AES_PREFER_VAES)
+    endif()
+endif()
+if(HAVE_GROSTL_AVX2)
+    target_compile_definitions(ichor PUBLIC ICHOR_HAVE_GROSTL_AVX2)
+    set_source_files_properties(src/grostl_avx2.c PROPERTIES
+        COMPILE_FLAGS "-mavx2 -maes -mssse3 -msse2")
+endif()
+# The GFNI backend reuses the 128-bit AES-NI single-permutation entries for the
+# lone Omega P, so it is enabled only when AES-NI is also compiled (every GFNI
+# CPU has AES-NI).
+if(HAVE_GROSTL_AVX2_GFNI AND HAVE_AES_NI)
+    target_compile_definitions(ichor PUBLIC ICHOR_HAVE_GROSTL_AVX2_GFNI)
+    set_source_files_properties(src/grostl_avx2_gfni.c PROPERTIES
+        COMPILE_FLAGS "-mavx2 -mgfni -msse2")
+endif()
 if(HAVE_ARMV8_AES)
     target_compile_definitions(ichor PUBLIC ICHOR_HAVE_ARMV8_AES)
     if(ARMV8_CRYPTO_FLAGS)
@@ -320,6 +677,52 @@ if(HAVE_PMULL)
         set_source_files_properties(src/clmul_pmull.c PROPERTIES
             COMPILE_FLAGS "${PMULL_CRYPTO_FLAGS}")
     endif()
+endif()
+if(HAVE_GF256_SSSE3)
+    target_compile_definitions(ichor PUBLIC ICHOR_HAVE_GF256_SSSE3)
+    set_source_files_properties(src/gf256_ssse3.c PROPERTIES
+        COMPILE_FLAGS "-mssse3 -msse2")
+endif()
+if(HAVE_GF256_AVX2)
+    target_compile_definitions(ichor PUBLIC ICHOR_HAVE_GF256_AVX2)
+    set_source_files_properties(src/gf256_avx2.c PROPERTIES
+        COMPILE_FLAGS "-mavx2 -mssse3 -msse2")
+endif()
+if(HAVE_GF256_GFNI)
+    target_compile_definitions(ichor PUBLIC ICHOR_HAVE_GF256_GFNI)
+    set_source_files_properties(src/gf256_gfni.c PROPERTIES
+        COMPILE_FLAGS "-mgfni -mavx2 -msse2")
+endif()
+if(HAVE_GF16_SSSE3)
+    target_compile_definitions(ichor PUBLIC ICHOR_HAVE_GF16_SSSE3)
+    set_source_files_properties(src/gf16_ssse3.c PROPERTIES
+        COMPILE_FLAGS "-mssse3 -msse2")
+endif()
+if(HAVE_GF256_NEON)
+    # Advanced SIMD is baseline on aarch64, so no per-TU arch flag.
+    target_compile_definitions(ichor PUBLIC ICHOR_HAVE_GF256_NEON)
+endif()
+if(HAVE_GF16_NEON)
+    target_compile_definitions(ichor PUBLIC ICHOR_HAVE_GF16_NEON)
+endif()
+if(HAVE_GF16_GFNI)
+    target_compile_definitions(ichor PUBLIC ICHOR_HAVE_GF16_GFNI)
+    set_source_files_properties(src/gf16_gfni.c PROPERTIES
+        COMPILE_FLAGS "-mgfni -mavx2 -msse2")
+endif()
+if(HAVE_KECCAK_X4_AVX2)
+    target_compile_definitions(ichor PUBLIC ICHOR_HAVE_KECCAK_X4_AVX2)
+    set_source_files_properties(src/keccak_x4_avx2.c PROPERTIES
+        COMPILE_FLAGS "-mavx2")
+endif()
+if(HAVE_KECCAK_SHA3)
+    target_compile_definitions(ichor PUBLIC ICHOR_HAVE_KECCAK_SHA3)
+    set_source_files_properties(src/keccak_sha3_neon.c PROPERTIES
+        COMPILE_FLAGS "${SHA3_FLAGS}")
+    # The 4-way batched SHA-3 kernel rides the same FEAT_SHA3 probe / flag.
+    target_compile_definitions(ichor PUBLIC ICHOR_HAVE_KECCAK_X4_SHA3)
+    set_source_files_properties(src/keccak_x4_sha3_neon.c PROPERTIES
+        COMPILE_FLAGS "${SHA3_FLAGS}")
 endif()
 
 # Software-only companion library.  Same sources as `ichor` minus the
@@ -346,18 +749,30 @@ if(ICHOR_BUILD_SOFT_LIB)
         src/aes_ct64.c
         src/aes_ct64_ops.c
         src/clmul.c
+        src/gf256.c
+        src/gf16.c
         src/hash.c
+        src/keccak_x4.c
         src/hirose.c
         src/aesdm.c
         src/grostl.c
         src/grostl_soft.c
         src/gf2x.c
-        src/sample.c)
+        src/sample.c
+        src/pool.c)
     add_library(ichor_soft STATIC ${ICHOR_SOFT_SOURCES})
     set_target_properties(ichor_soft PROPERTIES
         OUTPUT_NAME talos_ichor_soft
         POSITION_INDEPENDENT_CODE ON)
     target_compile_options(ichor_soft PRIVATE ${ICHOR_HARDENING_COMPILE_OPTIONS})
+    # Mirror the thread-pool wiring so ichor_soft stays a drop-in replacement.
+    if(ICHOR_THREADS)
+        find_package(Threads REQUIRED)
+        target_link_libraries(ichor_soft PUBLIC Threads::Threads)
+        target_compile_definitions(ichor_soft PUBLIC ICHOR_WITH_THREADS=1)
+    else()
+        target_compile_definitions(ichor_soft PUBLIC ICHOR_WITH_THREADS=0)
+    endif()
     # Deliberately no ICHOR_HAVE_* defines: the hardware backend TUs are absent
     # and the dispatch guards compile them out, leaving software-only.
     if(ICHOR_ENABLE_FORCE_BACKEND)
@@ -376,4 +791,8 @@ endif()
 
 if(ICHOR_BUILD_DUDECT)
     add_subdirectory(tools/dudect)
+endif()
+
+if(ICHOR_BUILD_BENCH)
+    add_subdirectory(tools/bench)
 endif()

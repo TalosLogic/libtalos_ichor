@@ -18,4 +18,6 @@ ichor_backend_report(ichor_backend_report_t *out)
     out->aes = ichor_aes_backend_health();
     out->clmul = ichor_clmul_backend_health();
     out->grostl = ichor_grostl_backend_health();
+    out->gf256 = ichor_gf256_backend_health();
+    out->gf16 = ichor_gf16_backend_health();
 }

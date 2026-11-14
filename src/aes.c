@@ -38,8 +38,26 @@ ichor_aes_dispatch_init(void)
     /* feat is consulted only by the hardware backends; a lean build with none
      * compiled in selects the bitsliced path unconditionally and never reads
      * it. */
-#if defined(ICHOR_HAVE_AES_NI) || defined(ICHOR_HAVE_ARMV8_AES)
+#if defined(ICHOR_HAVE_AES_NI) || defined(ICHOR_HAVE_ARMV8_AES) ||             \
+    defined(ICHOR_HAVE_AES_VAES)
     uint32_t feat = ichor_cpu_features();
+    /*
+     * Backend priority.  VAES carries the same key schedule and single-block
+     * path as AES-NI but batches the keystream across YMM lanes.  Whether it
+     * outranks AES-NI is a build-time policy, because a CPUID VAES bit does
+     * not promise a full-rate 256-bit datapath: on a split-256 core (e.g.
+     * Gracemont) vaesenc is two aesenc with no throughput gain, so VAES loses
+     * to AES-NI there at every width, while on a full-rate core it wins on
+     * wide single-key batches.  No feature bit distinguishes the two, so the
+     * choice is left to ICHOR_AES_PREFER_VAES (default ON): most hosts that
+     * advertise VAES are the full-rate kind, and a split-256 deployment builds
+     * with it OFF to pin AES-NI.  Both VAES picks below need an enabled AVX
+     * state (AVX2 bit), since the 256-bit encrypt path uses AVX2 broadcasts.
+     */
+#if defined(ICHOR_HAVE_AES_VAES) && defined(ICHOR_AES_PREFER_VAES)
+    if (pick == NULL && (feat & ICHOR_CPU_VAES) && (feat & ICHOR_CPU_AVX2))
+        pick = &ichor_aes_ops_vaes;
+#endif
 #ifdef ICHOR_HAVE_AES_NI
     if (pick == NULL && (feat & ICHOR_CPU_AES_NI))
         pick = &ichor_aes_ops_aesni;
@@ -47,6 +65,12 @@ ichor_aes_dispatch_init(void)
 #ifdef ICHOR_HAVE_ARMV8_AES
     if (pick == NULL && (feat & ICHOR_CPU_ARMV8_AES))
         pick = &ichor_aes_ops_armv8;
+#endif
+#if defined(ICHOR_HAVE_AES_VAES) && !defined(ICHOR_AES_PREFER_VAES)
+    /* VAES not preferred: reached only when AES-NI / ARMv8 did not pick,
+     * i.e. absent from the build or cleared by a forced-backend override. */
+    if (pick == NULL && (feat & ICHOR_CPU_VAES) && (feat & ICHOR_CPU_AVX2))
+        pick = &ichor_aes_ops_vaes;
 #endif
 #endif /* any hardware AES backend */
 
@@ -104,6 +128,41 @@ ichor_aes_encrypt(const ichor_aes_ctx_t *ctx, uint8_t out[16],
 }
 
 void
+ichor_aes_encrypt_wide(const ichor_aes_ctx_t *ctx, uint8_t *out,
+                       const uint8_t *in, unsigned n)
+{
+    const ichor_aes_ops_t *ops =
+        atomic_load_explicit(&ichor_aes_ops, memory_order_acquire);
+    if (ops == NULL) {
+        ichor_aes_dispatch_init();
+        ops = atomic_load_explicit(&ichor_aes_ops, memory_order_acquire);
+    }
+    if (n == 0)
+        return;
+
+    if (ops->encrypt_wide != NULL) {
+        ops->encrypt_wide(ctx, out, in, n);
+        return;
+    }
+
+    /*
+     * Generic composition for backends that expose only encrypt / encrypt_x4.
+     * Full groups of four go through the 4-block entry (one bitsliced engine
+     * pass, or four serial encrypts on the scalar hardware paths); the 1..3
+     * remaining blocks fall to single-block encrypts.  This is already optimal
+     * for the bitsliced, AES-NI, and ARMv8 tables, so only VAES overrides
+     * encrypt_wide.
+     */
+    unsigned i = 0;
+    while (i + 4 <= n) {
+        ops->encrypt_x4(ctx, out + 16 * i, in + 16 * i);
+        i += 4;
+    }
+    for (; i < n; i++)
+        ops->encrypt(ctx, out + 16 * i, in + 16 * i);
+}
+
+void
 ichor_aes_encrypt_x4(const ichor_aes_ctx_t *ctx, uint8_t out[64],
                      const uint8_t in[64])
 {
@@ -113,7 +172,47 @@ ichor_aes_encrypt_x4(const ichor_aes_ctx_t *ctx, uint8_t out[64],
         ichor_aes_dispatch_init();
         ops = atomic_load_explicit(&ichor_aes_ops, memory_order_acquire);
     }
-    ops->encrypt_x4(ctx, out, in);
+
+    /*
+     * Go straight to the backend's own four-block entry (one bitsliced engine
+     * pass, four serial AES-NI / ARMv8 encrypts) or, for a wide-only backend
+     * such as VAES, its batch path with n == 4.  Routing through the public
+     * ichor_aes_encrypt_wide instead added a call layer and the generic
+     * compose loop, which measured as ~8 ns on the serial backends for no
+     * benefit.
+     */
+    if (ops->encrypt_wide != NULL)
+        ops->encrypt_wide(ctx, out, in, 4);
+    else
+        ops->encrypt_x4(ctx, out, in);
+}
+
+void
+ichor_aes_encrypt_multikey(const ichor_aes_ctx_t *const *ctxs,
+                           uint8_t *const *outs, const uint8_t *const *ins,
+                           unsigned n)
+{
+    const ichor_aes_ops_t *ops =
+        atomic_load_explicit(&ichor_aes_ops, memory_order_acquire);
+    if (ops == NULL) {
+        ichor_aes_dispatch_init();
+        ops = atomic_load_explicit(&ichor_aes_ops, memory_order_acquire);
+    }
+    if (n == 0)
+        return;
+
+    if (ops->encrypt_multikey != NULL) {
+        ops->encrypt_multikey(ctxs, outs, ins, n);
+        return;
+    }
+
+    /*
+     * Generic composition: one single-block encrypt per lane under that
+     * lane's own schedule.  This is exactly the cost of n serial encrypts, so
+     * only the VAES table overrides it to run the lanes across YMM registers.
+     */
+    for (unsigned i = 0; i < n; i++)
+        ops->encrypt(ctxs[i], outs[i], ins[i]);
 }
 
 int
@@ -209,6 +308,8 @@ ichor_aes_backend_name(void)
         return "ARMv8 Cryptography Extension (aarch64 hardware)";
     case ICHOR_AES_BACKEND_BITSLICED:
         return "bitsliced (portable constant-time software)";
+    case ICHOR_AES_BACKEND_VAES:
+        return "VAES (x86_64 vector AES hardware)";
     }
     return "unknown";
 }

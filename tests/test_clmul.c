@@ -59,7 +59,10 @@ main(void)
 {
     size_t i;
     int kat_ok = 1, comm_ok = 1, resolve_ok = 1;
+    int x2_ok = 1, x2_resolve_ok = 1;
     ichor_clmul64_fn fn;
+    ichor_clmul64_x2_fn fn_x2;
+    uint64_t rng = 0x123456789abcdef0ull;
 
     printf("clmul tests (backend: %s):\n", ichor_clmul_backend_name());
 
@@ -92,6 +95,50 @@ main(void)
             resolve_ok = 0;
     }
     report("resolve() matches forwarder", resolve_ok);
+
+    /*
+     * The 2-wide multiply computes two independent products that must each
+     * equal the single mul, on every backend.  Check the KAT vectors paired
+     * up, then a sweep of pseudo-random operand pairs.
+     */
+    for (i = 0; i + 1 < sizeof kat / sizeof kat[0]; i += 2) {
+        uint64_t lo2[2], hi2[2], l0, h0, l1, h1;
+        ichor_clmul64_x2(kat[i].a, kat[i].b, kat[i + 1].a, kat[i + 1].b, lo2,
+                         hi2);
+        ichor_clmul64(kat[i].a, kat[i].b, &l0, &h0);
+        ichor_clmul64(kat[i + 1].a, kat[i + 1].b, &l1, &h1);
+        if (lo2[0] != l0 || hi2[0] != h0 || lo2[1] != l1 || hi2[1] != h1)
+            x2_ok = 0;
+    }
+    for (i = 0; i < 4096; i++) {
+        uint64_t a0, b0, a1, b1, lo2[2], hi2[2], l0, h0, l1, h1;
+        rng = rng * 6364136223846793005ull + 1442695040888963407ull;
+        a0 = rng;
+        rng = rng * 6364136223846793005ull + 1442695040888963407ull;
+        b0 = rng;
+        rng = rng * 6364136223846793005ull + 1442695040888963407ull;
+        a1 = rng;
+        rng = rng * 6364136223846793005ull + 1442695040888963407ull;
+        b1 = rng;
+        ichor_clmul64_x2(a0, b0, a1, b1, lo2, hi2);
+        ichor_clmul64(a0, b0, &l0, &h0);
+        ichor_clmul64(a1, b1, &l1, &h1);
+        if (lo2[0] != l0 || hi2[0] != h0 || lo2[1] != l1 || hi2[1] != h1)
+            x2_ok = 0;
+    }
+    report("x2 matches two single muls", x2_ok);
+
+    /* The resolved x2 pointer agrees with the forwarder. */
+    fn_x2 = ichor_clmul64_x2_resolve();
+    for (i = 0; i < sizeof kat / sizeof kat[0]; i++) {
+        uint64_t lo1[2], hi1[2], lo2[2], hi2[2];
+        ichor_clmul64_x2(kat[i].a, kat[i].b, kat[i].b, kat[i].a, lo1, hi1);
+        fn_x2(kat[i].a, kat[i].b, kat[i].b, kat[i].a, lo2, hi2);
+        if (lo1[0] != lo2[0] || hi1[0] != hi2[0] || lo1[1] != lo2[1] ||
+            hi1[1] != hi2[1])
+            x2_resolve_ok = 0;
+    }
+    report("x2_resolve() matches forwarder", x2_resolve_ok);
 
     if (failures != 0) {
         fprintf(stderr, "clmul: %d failure(s)\n", failures);

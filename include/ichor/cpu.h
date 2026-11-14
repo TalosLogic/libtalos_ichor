@@ -36,11 +36,22 @@
  * because the first AVX instruction would otherwise fault.  FMA operates on YMM
  * and carries the same OS-state requirement.
  */
-#define ICHOR_CPU_AVX (1u << 4)        /* x86_64: CPUID.01H:ECX[28], OS-gated */
-#define ICHOR_CPU_FMA (1u << 5)        /* x86_64: CPUID.01H:ECX[12], OS-gated */
-#define ICHOR_CPU_AVX2 (1u << 6)       /* x86_64: CPUID.07H:EBX[5],  OS-gated */
+#define ICHOR_CPU_AVX (1u << 4)  /* x86_64: CPUID.01H:ECX[28], OS-gated */
+#define ICHOR_CPU_FMA (1u << 5)  /* x86_64: CPUID.01H:ECX[12], OS-gated */
+#define ICHOR_CPU_AVX2 (1u << 6) /* x86_64: CPUID.07H:EBX[5],  OS-gated */
+#define ICHOR_CPU_VAES (1u << 7) /* x86_64: CPUID.07H:ECX[9],  OS-gated */
+#define ICHOR_CPU_GFNI                                                         \
+    (1u << 8) /* x86_64: CPUID.07H:ECX[8]; 128-bit    \
+                                        * form needs no AVX state              */
+#define ICHOR_CPU_VPCLMULQDQ                                                   \
+    (1u << 9) /* x86_64: CPUID.07H:ECX[10], OS-gated (256-bit YMM) */
 #define ICHOR_CPU_ARMV8_AES (1u << 16) /* aarch64: HWCAP_AES             */
 #define ICHOR_CPU_PMULL (1u << 17)     /* aarch64: HWCAP_PMULL           */
+#define ICHOR_CPU_SHA3 (1u << 18)      /* aarch64: HWCAP_SHA3 (FEAT_SHA3) */
+#define ICHOR_CPU_NEON                                                         \
+    (1u                                                                        \
+     << 19) /* aarch64: Advanced SIMD, mandatory on ARMv8-A (always set on  \
+                * an aarch64 build); gates the NEON TBL gf256/gf16 backends */
 
 /* ========================================================================
  * API
@@ -54,6 +65,24 @@
  * with a single atomic load.
  */
 uint32_t ichor_cpu_features(void);
+
+/*
+ * Return the number of physical cores on the running system (best effort,
+ * always >= 1).  This is the thread-count default a consumer should prefer for
+ * compute-bound work: hyperthread siblings share execution ports, so the
+ * physical count usually beats the logical count.  It queries OS topology (Linux
+ * sysfs then /proc/cpuinfo, macOS sysctl) and never uses CPUID, which is wrong
+ * on hybrid parts.  Falls back to the logical-CPU count when no physical/logical
+ * distinction is available.  See docs/THREAD_POOL.md Section 11.
+ */
+unsigned ichor_cpu_physical_cores(void);
+
+/*
+ * Return the number of logical CPUs online (SMT siblings counted), always >= 1.
+ * This is the old default, offered so a caller that specifically wants the
+ * logical count can pass it as an explicit nthreads.
+ */
+unsigned ichor_cpu_logical_cpus(void);
 
 /*
  * Override the cached feature bitmask.

@@ -203,7 +203,7 @@ test_no_cross_arch_bits(void)
     uint32_t mask = ichor_cpu_features();
 #if defined(__x86_64__) || defined(_M_X64)
     /* On x86_64, aarch64 bits must be clear. */
-    if (mask & (ICHOR_CPU_ARMV8_AES | ICHOR_CPU_PMULL))
+    if (mask & (ICHOR_CPU_ARMV8_AES | ICHOR_CPU_PMULL | ICHOR_CPU_SHA3))
         FAIL("aarch64 bits set on x86_64 host");
     else
         PASS();
@@ -211,7 +211,8 @@ test_no_cross_arch_bits(void)
     /* On aarch64, x86_64 bits must be clear. */
     if (mask &
         (ICHOR_CPU_AES_NI | ICHOR_CPU_CLMUL | ICHOR_CPU_SSE41 |
-         ICHOR_CPU_SSSE3 | ICHOR_CPU_AVX | ICHOR_CPU_FMA | ICHOR_CPU_AVX2))
+         ICHOR_CPU_SSSE3 | ICHOR_CPU_AVX | ICHOR_CPU_FMA | ICHOR_CPU_AVX2 |
+         ICHOR_CPU_VAES | ICHOR_CPU_GFNI | ICHOR_CPU_VPCLMULQDQ))
         FAIL("x86_64 bits set on aarch64 host");
     else
         PASS();

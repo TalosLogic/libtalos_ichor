@@ -89,10 +89,70 @@ void ichor_aes_encrypt(const ichor_aes_ctx_t *ctx, uint8_t out[16],
  *
  * The bitsliced backend services this with a single 4-block engine
  * call (4x faster than four single-block encrypts); the AES-NI
- * backend falls back to four chained single-block encrypts.
+ * backend falls back to four chained single-block encrypts.  Retained
+ * for API stability; it now forwards to ichor_aes_encrypt_wide with
+ * n == 4, so every backend handles it exactly as before.
  */
 void ichor_aes_encrypt_x4(const ichor_aes_ctx_t *ctx, uint8_t out[64],
                           const uint8_t in[64]);
+
+/*
+ * Recommended batch width for ichor_aes_encrypt_wide.  A caller that
+ * feeds the keystream loop ICHOR_AES_WIDE_MAX blocks per call lets the
+ * widest backend (VAES: four YMM dependency chains) run at full
+ * throughput.  Larger n is accepted and processed in waves of this size;
+ * smaller n is accepted and costs only what that count requires.
+ */
+#define ICHOR_AES_WIDE_MAX 8
+
+/*
+ * Encrypts n consecutive 16-byte blocks (ECB) under the same key.
+ *
+ * out and in hold n consecutive blocks (block b occupies bytes
+ * 16*b .. 16*b+15); out and in may alias, and out needs space for
+ * exactly n blocks.  n must be >= 1; see ICHOR_AES_WIDE_MAX for the width
+ * that saturates the widest backend.
+ *
+ * This is the width-agnostic batch entry point: the caller states a true
+ * block count and the active backend chooses how to service it.  A fixed
+ * internal width (bitsliced's 4-block engine, VAES's 2-block YMM lane) is
+ * filled with padding the backend supplies and discards, so a partial
+ * batch costs no more than a full one on those backends; the serial
+ * backends (AES-NI, ARMv8) run exactly n blocks and never pad.  out and in
+ * may alias.  Constant-time in the key and the data; the block count n is
+ * public.
+ */
+void ichor_aes_encrypt_wide(const ichor_aes_ctx_t *ctx, uint8_t *out,
+                            const uint8_t *in, unsigned n);
+
+/*
+ * Encrypts n single blocks, block i under its own key schedule ctxs[i].
+ *
+ * ctxs, outs, and ins are arrays of n pointers; outs[i] and ins[i] each
+ * address one 16-byte block, and outs[i] may alias ins[i] (in-place).
+ * Distinct blocks must not overlap.  n must be >= 1; the batch is processed
+ * in waves of at most ICHOR_AES_WIDE_MAX, so any n is accepted.
+ *
+ * This is the one-block-per-key counterpart to ichor_aes_encrypt_wide (which
+ * is many-blocks-per-key).  Because each lane is an independent single-block
+ * encrypt, it is the mode-agnostic batch primitive: it drives up to
+ * ICHOR_AES_WIDE_MAX independent streams of any mode (CBC, CTR, a GGM tree
+ * level) in parallel, with the per-stream chaining left to the caller.
+ *
+ * All ctxs must share the same key size (same number of rounds); split the
+ * batch across calls if they differ.  Every backend services this as n
+ * single-block encrypts: the independent per-key chains pipeline to near the
+ * single-block rate, and a VAES lane-parallel kernel was measured slower (the
+ * per-call round-key gather costs more than it saves), so none is used.
+ * Constant-time in the keys and data; the count n is public.
+ */
+void ichor_aes_encrypt_multikey(const ichor_aes_ctx_t *const *ctxs,
+                                uint8_t *const *outs, const uint8_t *const *ins,
+                                unsigned n);
+
+/* Feature test: defined when ichor_aes_encrypt_multikey is available, so a
+ * consumer that also builds against older ichor revisions can guard its use. */
+#define ICHOR_AES_HAVE_MULTIKEY 1
 
 /*
  * CTR-mode keystream over the forward cipher, with an explicit
@@ -136,6 +196,7 @@ typedef enum {
     ICHOR_AES_BACKEND_AESNI = 1,
     ICHOR_AES_BACKEND_ARMV8 = 2,
     ICHOR_AES_BACKEND_BITSLICED = 3,
+    ICHOR_AES_BACKEND_VAES = 4,
 } ichor_aes_backend_t;
 
 ichor_aes_backend_t ichor_aes_backend(void);

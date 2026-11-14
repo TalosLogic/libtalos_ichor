@@ -49,8 +49,28 @@ ichor_grostl_dispatch_init(void)
     /* feat is consulted only by the hardware backends; a lean build with none
      * compiled in selects the software path unconditionally and never reads
      * it. */
-#if defined(ICHOR_HAVE_AES_NI) || defined(ICHOR_HAVE_ARMV8_AES)
+#if defined(ICHOR_HAVE_AES_NI) || defined(ICHOR_HAVE_ARMV8_AES) ||             \
+    defined(ICHOR_HAVE_GROSTL_AVX2) || defined(ICHOR_HAVE_GROSTL_AVX2_GFNI)
     uint32_t feat = ichor_cpu_features();
+    /*
+     * Priority: the widened 256-bit backends (P and Q lockstepped in YMM) over
+     * the 128-bit AES-NI round.  GFNI additionally collapses the S-box to one
+     * instruction, so it outranks the plain-AVX2 widening.  All are compiled
+     * into the one binary; the running CPU's features pick the best it can run.
+     * Unlike VAES, these are cleanly feature-gated wins (the GFNI S-box is
+     * 128-bit so no split-256 penalty), so no build-time preference knob.
+     */
+#ifdef ICHOR_HAVE_GROSTL_AVX2_GFNI
+    /* GFNI S-box needs no AES-NI, but the lone Omega P reuses the 128-bit
+     * AES-NI entry, so require AES-NI too (universal on GFNI hardware). */
+    if (pick == NULL && (feat & ICHOR_CPU_GFNI) && (feat & ICHOR_CPU_AVX2) &&
+        (feat & ICHOR_CPU_AES_NI))
+        pick = &ichor_grostl_ops_avx2_gfni;
+#endif
+#ifdef ICHOR_HAVE_GROSTL_AVX2
+    if (pick == NULL && (feat & ICHOR_CPU_AVX2) && (feat & ICHOR_CPU_AES_NI))
+        pick = &ichor_grostl_ops_avx2;
+#endif
 #ifdef ICHOR_HAVE_AES_NI
     if (pick == NULL && (feat & ICHOR_CPU_AES_NI))
         pick = &ichor_grostl_ops_aesni;
@@ -120,8 +140,12 @@ compress_512(uint8_t h[GROSTL_STATE_BYTES_256],
         q_in[i] = m[i];
     }
 
-    ichor_grostl_ops->p512(p_in);
-    ichor_grostl_ops->q512(q_in);
+    if (ichor_grostl_ops->pq512 != NULL) {
+        ichor_grostl_ops->pq512(p_in, q_in);
+    } else {
+        ichor_grostl_ops->p512(p_in);
+        ichor_grostl_ops->q512(q_in);
+    }
 
     for (size_t i = 0; i < GROSTL_STATE_BYTES_256; i++)
         h[i] ^= (uint8_t)(p_in[i] ^ q_in[i]);
@@ -142,8 +166,12 @@ compress_1024(uint8_t h[GROSTL_STATE_BYTES_512],
         q_in[i] = m[i];
     }
 
-    ichor_grostl_ops->p1024(p_in);
-    ichor_grostl_ops->q1024(q_in);
+    if (ichor_grostl_ops->pq1024 != NULL) {
+        ichor_grostl_ops->pq1024(p_in, q_in);
+    } else {
+        ichor_grostl_ops->p1024(p_in);
+        ichor_grostl_ops->q1024(q_in);
+    }
 
     for (size_t i = 0; i < GROSTL_STATE_BYTES_512; i++)
         h[i] ^= (uint8_t)(p_in[i] ^ q_in[i]);

@@ -25,12 +25,36 @@ typedef struct {
     int (*key_expand)(ichor_aes_ctx_t *, const uint8_t *, int);
     void (*encrypt)(const ichor_aes_ctx_t *, uint8_t[16], const uint8_t[16]);
     void (*encrypt_x4)(const ichor_aes_ctx_t *, uint8_t[64], const uint8_t[64]);
+    /*
+     * Width-agnostic batch encrypt.  Optional: a backend that leaves this
+     * NULL is serviced by the generic composition in aes.c (encrypt_x4 for
+     * full groups of four, then encrypt for the tail), which is already
+     * optimal for the bitsliced, AES-NI, and ARMv8 tables.  Only the VAES
+     * table sets it, to keep several YMM dependency chains in flight across
+     * the whole batch.
+     */
+    void (*encrypt_wide)(const ichor_aes_ctx_t *, uint8_t *, const uint8_t *,
+                         unsigned);
+    /*
+     * Multi-key batch encrypt: block i under its own schedule ctxs[i], one
+     * block per key.  Optional, same convention as encrypt_wide: a NULL slot
+     * is serviced by the generic per-lane composition in aes.c (n serial
+     * single-block encrypts).  No current table sets it: the serial
+     * composition measured faster than a VAES lane-parallel kernel on every
+     * tested core (the per-call round-key gather does not amortize).  The slot
+     * is kept for a future backend that could.
+     */
+    void (*encrypt_multikey)(const ichor_aes_ctx_t *const *, uint8_t *const *,
+                             const uint8_t *const *, unsigned);
     ichor_aes_backend_t backend_tag;
     const char *name;
 } ichor_aes_ops_t;
 
 #ifdef ICHOR_HAVE_AES_NI
 extern const ichor_aes_ops_t ichor_aes_ops_aesni;
+#endif
+#ifdef ICHOR_HAVE_AES_VAES
+extern const ichor_aes_ops_t ichor_aes_ops_vaes;
 #endif
 #ifdef ICHOR_HAVE_ARMV8_AES
 extern const ichor_aes_ops_t ichor_aes_ops_armv8;

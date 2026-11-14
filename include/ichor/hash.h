@@ -116,4 +116,46 @@ int ichor_shake256_absorb_u64_le(ichor_hash_ctx_t *ctx, uint64_t v);
  */
 void ichor_hash_ctx_clear(ichor_hash_ctx_t *ctx);
 
+/*
+ * Human-readable name of the single-sponge Keccak-f[1600] permutation backend
+ * selected for the running CPU (for tests / benchmarks / health reporting):
+ * the ARMv8.2 SHA-3 kernel on an aarch64 host that has it, else the portable
+ * scalar permutation.  Resolves on first use.
+ */
+const char *ichor_keccak_f1600_backend_name(void);
+
+/*
+ * ---- 4-way batched SHAKE (AVX2, scalar fallback) ----
+ *
+ * Runs four INDEPENDENT SHAKE sponges in lockstep over one Keccak-f[1600]x4
+ * permutation, the standard N-way batched Keccak layout (one sponge per 64-bit
+ * lane of a 256-bit register).  This is a throughput primitive for callers that
+ * have four independent same-length hashes to compute at once; it is additive
+ * and does not change the single-sponge API above.
+ *
+ * One-shot only (no incremental x4 context): the four inputs share one length
+ * `inlen`, and the four outputs share one length `outlen`.  That matches the
+ * batchable consumer (the per-tree commitment hash, whose concatenated inputs
+ * are equal-length within a tree-size class).  Lane L reads from in[L][0..inlen)
+ * and writes to out[L][0..outlen); the four in/out pointers must not alias.
+ *
+ * Backend selection is runtime (AVX2 if present, else a portable scalar
+ * fallback that is byte-identical to four serial ichor_shakeN runs).  The
+ * output of lane L equals ichor_shake128/256(out[L], in[L], inlen) exactly.
+ */
+void ichor_shake128_x4(uint8_t *const out[4], size_t outlen,
+                       const uint8_t *const in[4], size_t inlen);
+void ichor_shake256_x4(uint8_t *const out[4], size_t outlen,
+                       const uint8_t *const in[4], size_t inlen);
+
+/* Active Keccak-f[1600]x4 backend (for tests / benchmarks / health reporting). */
+typedef enum {
+    ICHOR_KECCAK_X4_BACKEND_AVX2 = 1,  /* x86_64 AVX2 4-lane permutation */
+    ICHOR_KECCAK_X4_BACKEND_NEON_SHA3, /* aarch64 FEAT_SHA3 2x2-lane packed */
+    ICHOR_KECCAK_X4_BACKEND_SCALAR     /* portable 4x serial permutation */
+} ichor_keccak_x4_backend_t;
+
+ichor_keccak_x4_backend_t ichor_keccak_x4_backend(void);
+const char *ichor_keccak_x4_backend_name(void);
+
 #endif /* ICHOR_HASH_H */

@@ -14,6 +14,9 @@
 
 #include "hash.h"
 #include "util.h"
+#include "cpu.h"
+#include "keccak_dispatch.h"
+#include <stdatomic.h>
 #include <string.h>
 
 /* ---- Little-endian helpers ---- */
@@ -60,9 +63,13 @@ static const uint32_t ROT[25] = {
 /*
  * Keccak-f[1600] permutation - 24 rounds of θ, ρ, π, χ, ι.
  * FIPS 202 Sections 3.2.1-3.2.5, Algorithm 7 with n_r=24.
+ *
+ * This is the portable scalar permutation, always compiled in.  On an aarch64
+ * host with the SHA-3 extension the dispatcher below selects the byte-identical
+ * NEON kernel (keccak_sha3_neon.c) instead; everything calls keccak_f1600().
  */
 static void
-keccak_f1600(uint64_t state[25])
+keccak_f1600_scalar(uint64_t state[25])
 {
     for (int round = 0; round < 24; round++) {
         uint64_t C[5], D[5], B[25];
@@ -100,6 +107,69 @@ keccak_f1600(uint64_t state[25])
         state[0] ^= RC[round];
     }
 }
+
+/* ---- Keccak-f[1600] backend dispatch ---- */
+
+/*
+ * The permutation is selected once on first use and cached.  On aarch64 with
+ * the SHA-3 extension the NEON kernel is byte-identical to the scalar one, so
+ * the choice is invisible to callers; every sponge step calls keccak_f1600().
+ * The indirect call is one per 24-round permutation (per rate block), far
+ * below the cost of the rounds themselves.
+ */
+typedef void (*keccak_f1600_fn)(uint64_t[25]);
+
+/* Static storage zero-initializes to a null function pointer; an explicit
+ * `= NULL` would expand to (void *)0, whose conversion to a function pointer
+ * clang (pedantic) rejects as a non-constant initializer.  The resolve below
+ * treats the zero value as "unresolved", identically to NULL. */
+static _Atomic(keccak_f1600_fn) g_keccak_f1600;
+
+static keccak_f1600_fn
+keccak_f1600_resolve(void)
+{
+    keccak_f1600_fn f =
+        atomic_load_explicit(&g_keccak_f1600, memory_order_acquire);
+    if (f != NULL)
+        return f;
+
+#ifdef ICHOR_HAVE_KECCAK_SHA3
+    if (ichor_cpu_features() & ICHOR_CPU_SHA3)
+        f = ichor_keccak_f1600_sha3;
+    else
+#endif
+        f = keccak_f1600_scalar;
+
+    keccak_f1600_fn expected = NULL;
+    atomic_compare_exchange_strong_explicit(&g_keccak_f1600, &expected, f,
+                                            memory_order_release,
+                                            memory_order_acquire);
+    return atomic_load_explicit(&g_keccak_f1600, memory_order_acquire);
+}
+
+static inline void
+keccak_f1600(uint64_t state[25])
+{
+    keccak_f1600_resolve()(state);
+}
+
+const char *
+ichor_keccak_f1600_backend_name(void)
+{
+#ifdef ICHOR_HAVE_KECCAK_SHA3
+    if (keccak_f1600_resolve() == ichor_keccak_f1600_sha3)
+        return "ARMv8.2 SHA-3 (aarch64 hardware)";
+#endif
+    return "scalar (portable constant-time software)";
+}
+
+#ifdef ICHOR_ENABLE_FORCE_BACKEND
+void
+ichor_keccak_f1600_dispatch_reset(void)
+{
+    atomic_store_explicit(&g_keccak_f1600, NULL, memory_order_release);
+}
+#endif
 
 /* ---- Sponge byte-level state access ---- */
 

@@ -1,6 +1,9 @@
 # Build output
 /build/
 build*/
+
+# Micro-benchmark output (tools/bench/run_ab.sh)
+/bench-results/
 *.o
 *.a
 *.so

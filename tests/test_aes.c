@@ -209,6 +209,142 @@ test_aes128_encrypt_x4(void)
 }
 
 /* ================================================================
+ * ichor_aes_encrypt_wide vs per-block single encrypts, for every
+ * width 1..ICHOR_AES_WIDE_MAX and one wave-and-a-half past it, under
+ * both AES-128 and AES-256 so the VAES 128/256 round counts are both
+ * exercised.  Also checks aliased in == out.
+ * ================================================================ */
+
+static int
+check_wide_width(const ichor_aes_ctx_t *ctx, const uint8_t *in, unsigned n)
+{
+    uint8_t out_wide[16 * (ICHOR_AES_WIDE_MAX + 4)];
+    uint8_t out_ref[16 * (ICHOR_AES_WIDE_MAX + 4)];
+
+    ichor_aes_encrypt_wide(ctx, out_wide, in, n);
+    for (unsigned b = 0; b < n; b++)
+        ichor_aes_encrypt(ctx, out_ref + 16 * b, in + 16 * b);
+    if (memcmp(out_wide, out_ref, 16 * n) != 0)
+        return -1;
+
+    /* Aliased in == out must match the same reference. */
+    uint8_t buf[16 * (ICHOR_AES_WIDE_MAX + 4)];
+    memcpy(buf, in, 16 * n);
+    ichor_aes_encrypt_wide(ctx, buf, buf, n);
+    if (memcmp(buf, out_ref, 16 * n) != 0)
+        return -1;
+    return 0;
+}
+
+static void
+test_encrypt_wide(int key_bits)
+{
+    char name[64];
+    snprintf(name, sizeof(name),
+             "AES-%d encrypt_wide vs single-block (n=1..%d)", key_bits,
+             ICHOR_AES_WIDE_MAX + 4);
+    TEST(name);
+
+    const uint8_t key[32] = {0x60, 0x3d, 0xeb, 0x10, 0x15, 0xca, 0x71, 0xbe,
+                             0x2b, 0x73, 0xae, 0xf0, 0x85, 0x7d, 0x77, 0x81,
+                             0x1f, 0x35, 0x2c, 0x07, 0x3b, 0x61, 0x08, 0xd7,
+                             0x2d, 0x98, 0x10, 0xa3, 0x09, 0x14, 0xdf, 0xf4};
+    uint8_t in[16 * (ICHOR_AES_WIDE_MAX + 4)];
+    ichor_aes_ctx_t ctx;
+
+    for (size_t i = 0; i < sizeof(in); i++)
+        in[i] = (uint8_t)(i * 7 + 1);
+
+    ichor_aes_key_expand(&ctx, key, key_bits);
+    for (unsigned n = 1; n <= ICHOR_AES_WIDE_MAX + 4; n++) {
+        if (check_wide_width(&ctx, in, n) != 0) {
+            char msg[64];
+            snprintf(msg, sizeof(msg), "mismatch at n=%u", n);
+            FAIL(msg);
+            ichor_aes_ctx_clear(&ctx);
+            return;
+        }
+    }
+    ichor_aes_ctx_clear(&ctx);
+    PASS();
+}
+
+#define MK_MAX (ICHOR_AES_WIDE_MAX + 4)
+
+static int
+check_multikey_width(const ichor_aes_ctx_t *ctxs, const uint8_t *in, unsigned n)
+{
+    const ichor_aes_ctx_t *ctxp[MK_MAX];
+    const uint8_t *inp[MK_MAX];
+    uint8_t *outp[MK_MAX];
+    uint8_t out_mk[16 * MK_MAX];
+    uint8_t out_ref[16 * MK_MAX];
+    uint8_t buf[16 * MK_MAX];
+
+    for (unsigned b = 0; b < n; b++) {
+        ctxp[b] = &ctxs[b];
+        inp[b] = in + 16 * b;
+        outp[b] = out_mk + 16 * b;
+    }
+
+    ichor_aes_encrypt_multikey(ctxp, outp, inp, n);
+    for (unsigned b = 0; b < n; b++)
+        ichor_aes_encrypt(&ctxs[b], out_ref + 16 * b, in + 16 * b);
+    if (memcmp(out_mk, out_ref, 16 * n) != 0)
+        return -1;
+
+    /* Aliased in == out, each lane in place, must match the same reference. */
+    memcpy(buf, in, 16 * n);
+    for (unsigned b = 0; b < n; b++) {
+        inp[b] = buf + 16 * b;
+        outp[b] = buf + 16 * b;
+    }
+    ichor_aes_encrypt_multikey(ctxp, outp, inp, n);
+    if (memcmp(buf, out_ref, 16 * n) != 0)
+        return -1;
+    return 0;
+}
+
+static void
+test_encrypt_multikey(int key_bits)
+{
+    char name[64];
+    snprintf(name, sizeof(name),
+             "AES-%d encrypt_multikey vs single-block (n=1..%d)", key_bits,
+             MK_MAX);
+    TEST(name);
+
+    ichor_aes_ctx_t ctxs[MK_MAX];
+    uint8_t in[16 * MK_MAX];
+    uint8_t key[32];
+
+    for (size_t i = 0; i < sizeof(in); i++)
+        in[i] = (uint8_t)(i * 7 + 1);
+
+    /* A distinct key per lane, so a lane picking up the wrong schedule is
+     * caught by the mismatch against that lane's own single-block encrypt. */
+    for (unsigned b = 0; b < MK_MAX; b++) {
+        for (int j = 0; j < 32; j++)
+            key[j] = (uint8_t)(0x11 * (b + 1) + j);
+        ichor_aes_key_expand(&ctxs[b], key, key_bits);
+    }
+
+    for (unsigned n = 1; n <= MK_MAX; n++) {
+        if (check_multikey_width(ctxs, in, n) != 0) {
+            char msg[64];
+            snprintf(msg, sizeof(msg), "mismatch at n=%u", n);
+            FAIL(msg);
+            for (unsigned b = 0; b < MK_MAX; b++)
+                ichor_aes_ctx_clear(&ctxs[b]);
+            return;
+        }
+    }
+    for (unsigned b = 0; b < MK_MAX; b++)
+        ichor_aes_ctx_clear(&ctxs[b]);
+    PASS();
+}
+
+/* ================================================================
  * Invalid key-size rejection.
  * ================================================================ */
 
@@ -238,14 +374,20 @@ run_all_tests(void)
 {
     ichor_aes_backend_t be = ichor_aes_backend();
 
-    /* Round-key inspection: flat byte layout valid only for HW backends. */
-    if (be == ICHOR_AES_BACKEND_AESNI || be == ICHOR_AES_BACKEND_ARMV8) {
+    /* Round-key inspection: flat byte layout valid only for HW backends.
+     * VAES reuses the AES-NI schedule, so its layout is the same flat bytes. */
+    if (be == ICHOR_AES_BACKEND_AESNI || be == ICHOR_AES_BACKEND_ARMV8 ||
+        be == ICHOR_AES_BACKEND_VAES) {
         test_aes128_key_expansion();
         test_aes256_key_expansion();
     }
 
     test_aes128_inplace();
     test_aes128_encrypt_x4();
+    test_encrypt_wide(128);
+    test_encrypt_wide(256);
+    test_encrypt_multikey(128);
+    test_encrypt_multikey(256);
     test_invalid_key_size();
 
     aes_kat_run_all("ichor_aes", ichor_aes_kat_adapter, &tests_run,

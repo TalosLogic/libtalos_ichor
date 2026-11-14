@@ -28,8 +28,20 @@ clmul64_pclmul(uint64_t a, uint64_t b, uint64_t *lo, uint64_t *hi)
     *hi = (uint64_t)_mm_extract_epi64(p, 1);
 }
 
+/* 128-bit PCLMULQDQ has no 2-wide form; run the single mul twice.  (A
+ * 256-bit VPCLMULQDQ path was measured a wash with this pair on the clmul
+ * units of current x86 clients, so it is not carried.) */
+static void
+clmul64_x2_pclmul(uint64_t a0, uint64_t b0, uint64_t a1, uint64_t b1,
+                  uint64_t lo[2], uint64_t hi[2])
+{
+    clmul64_pclmul(a0, b0, &lo[0], &hi[0]);
+    clmul64_pclmul(a1, b1, &lo[1], &hi[1]);
+}
+
 const ichor_clmul_ops_t ichor_clmul_ops_pclmul = {
     .mul = clmul64_pclmul,
+    .mul_x2 = clmul64_x2_pclmul,
     .backend_tag = ICHOR_CLMUL_BACKEND_PCLMUL,
     .name = "pclmul",
 };

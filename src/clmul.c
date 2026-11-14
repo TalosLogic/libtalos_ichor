@@ -55,8 +55,18 @@ clmul64_scalar(uint64_t a, uint64_t b, uint64_t *lo, uint64_t *hi)
     *hi = h;
 }
 
+/* Two independent products, scalar: just run the single mul twice. */
+static void
+clmul64_x2_scalar(uint64_t a0, uint64_t b0, uint64_t a1, uint64_t b1,
+                  uint64_t lo[2], uint64_t hi[2])
+{
+    clmul64_scalar(a0, b0, &lo[0], &hi[0]);
+    clmul64_scalar(a1, b1, &lo[1], &hi[1]);
+}
+
 const ichor_clmul_ops_t ichor_clmul_ops_scalar = {
     .mul = clmul64_scalar,
+    .mul_x2 = clmul64_x2_scalar,
     .backend_tag = ICHOR_CLMUL_BACKEND_SCALAR,
     .name = "scalar",
 };
@@ -120,10 +130,23 @@ ichor_clmul64(uint64_t a, uint64_t b, uint64_t *lo, uint64_t *hi)
     clmul_ops()->mul(a, b, lo, hi);
 }
 
+void
+ichor_clmul64_x2(uint64_t a0, uint64_t b0, uint64_t a1, uint64_t b1,
+                 uint64_t lo[2], uint64_t hi[2])
+{
+    clmul_ops()->mul_x2(a0, b0, a1, b1, lo, hi);
+}
+
 ichor_clmul64_fn
 ichor_clmul64_resolve(void)
 {
     return clmul_ops()->mul;
+}
+
+ichor_clmul64_x2_fn
+ichor_clmul64_x2_resolve(void)
+{
+    return clmul_ops()->mul_x2;
 }
 
 ichor_clmul_backend_t

@@ -25,17 +25,22 @@
 #ifndef HWCAP_PMULL
 #define HWCAP_PMULL (1 << 4)
 #endif
+#ifndef HWCAP_SHA3
+#define HWCAP_SHA3 (1 << 17)
+#endif
 
 uint32_t
 ichor_cpu_probe(void)
 {
     uint64_t hwcap = getauxval(AT_HWCAP);
-    uint32_t mask = 0;
+    uint32_t mask = ICHOR_CPU_NEON; /* mandatory on ARMv8-A aarch64 */
 
     if (hwcap & HWCAP_AES)
         mask |= ICHOR_CPU_ARMV8_AES;
     if (hwcap & HWCAP_PMULL)
         mask |= ICHOR_CPU_PMULL;
+    if (hwcap & HWCAP_SHA3)
+        mask |= ICHOR_CPU_SHA3;
     return mask;
 }
 
@@ -58,12 +63,14 @@ sysctl_int(const char *name)
 uint32_t
 ichor_cpu_probe(void)
 {
-    uint32_t mask = 0;
+    uint32_t mask = ICHOR_CPU_NEON; /* mandatory on ARMv8-A aarch64 */
 
     if (sysctl_int("hw.optional.arm.FEAT_AES"))
         mask |= ICHOR_CPU_ARMV8_AES;
     if (sysctl_int("hw.optional.arm.FEAT_PMULL"))
         mask |= ICHOR_CPU_PMULL;
+    if (sysctl_int("hw.optional.arm.FEAT_SHA3"))
+        mask |= ICHOR_CPU_SHA3;
     return mask;
 }
 
