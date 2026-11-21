@@ -16,6 +16,9 @@
 
 #include "gf2x.h"
 
+#include "cpu.h"
+#include "gf2x_dispatch.h"
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -256,16 +259,17 @@ run_scatter_tests(void)
         size_t bb = (p + 7u) / 8u;
         uint8_t topmask = (p & 7u) ? (uint8_t)((1u << (p & 7u)) - 1u) : 0xFFu;
         uint32_t *idx = malloc((size_t)w * sizeof *idx);
-        uint8_t *got = malloc(bb), *ref = malloc(bb);
+        uint8_t *got = malloc(bb), *ref = malloc(bb), *scal = malloc(bb);
         int okall = 1;
 
-        if (idx == NULL || got == NULL || ref == NULL) {
+        if (idx == NULL || got == NULL || ref == NULL || scal == NULL) {
             printf("  FAIL scatter alloc\n");
             fails++;
             total++;
             free(idx);
             free(got);
             free(ref);
+            free(scal);
             return;
         }
         for (k = 0; k < w; k++) {
@@ -274,7 +278,11 @@ run_scatter_tests(void)
         }
         for (b = 0; b < n0; b++) {
             ichor_gf2x_scatter(got, bb, idx, w, b * p, p);
+            ichor_gf2x_scatter_scalar(scal, bb, idx, w, b * p, p);
             scatter_ref(ref, bb, idx, w, b * p, p);
+            /* The active backend must be byte-identical to the scalar floor. */
+            if (memcmp(got, scal, bb) != 0)
+                okall = 0;
             got[bb - 1] &= topmask; /* drop pad bits (canonicalize) */
             if (memcmp(got, ref, bb) != 0)
                 okall = 0;
@@ -287,6 +295,199 @@ run_scatter_tests(void)
         free(idx);
         free(got);
         free(ref);
+        free(scal);
+    }
+}
+
+#ifdef ICHOR_ENABLE_FORCE_BACKEND
+/*
+ * Scatter equivalence across every gf2x backend reachable on this host.  The
+ * gf2x backend is chosen purely from the CPU feature mask (there is no
+ * ICHOR_FORCE_BACKEND=gf2x:... override), so we drive ichor_cpu_features_override
+ * + ichor_gf2x_dispatch_reset to force each candidate and require every backend's
+ * ichor_gf2x_scatter to be byte-identical to ichor_gf2x_scatter_scalar.  SSE2 is
+ * baseline on x86_64 (selected with no feature bit), so clearing the wide bits
+ * selects it; clearing all SIMD bits selects scalar only where no baseline SIMD
+ * exists (aarch64).  Host features are restored before returning.  Compiled only
+ * with the test-only ICHOR_ENABLE_FORCE_BACKEND override.
+ */
+static int
+scatter_matches_scalar_allprimes(void)
+{
+    static const struct {
+        uint32_t p, n0, w;
+    } cfg[] = {
+        {7829u, 5u, 57u},
+        {13613u, 2u, 130u},
+        {24733u, 5u, 113u},
+        {43451u, 2u, 261u},
+    };
+    uint32_t seed = 0x2b3c4d5eu;
+    size_t ci;
+    int bad = 0;
+
+    for (ci = 0; ci < sizeof cfg / sizeof cfg[0]; ci++) {
+        uint32_t p = cfg[ci].p, n0 = cfg[ci].n0, w = cfg[ci].w, n = n0 * p, b,
+                 k;
+        size_t bb = (p + 7u) / 8u;
+        uint32_t *idx = malloc((size_t)w * sizeof *idx);
+        uint8_t *got = malloc(bb), *scal = malloc(bb);
+
+        if (idx == NULL || got == NULL || scal == NULL) {
+            bad++;
+            free(idx);
+            free(got);
+            free(scal);
+            continue;
+        }
+        for (k = 0; k < w; k++) {
+            seed = seed * 1103515245u + 12345u;
+            idx[k] = seed % n;
+        }
+        for (b = 0; b < n0; b++) {
+            ichor_gf2x_scatter(got, bb, idx, w, b * p, p);
+            ichor_gf2x_scatter_scalar(scal, bb, idx, w, b * p, p);
+            if (memcmp(got, scal, bb) != 0)
+                bad++;
+        }
+        free(idx);
+        free(got);
+        free(scal);
+    }
+    return bad;
+}
+
+static void
+run_scatter_backend_tests(void)
+{
+    uint32_t host = ichor_cpu_features();
+    uint32_t masks[4];
+    const char *seen[4];
+    size_t nm = 0, i;
+
+    /*
+     * Downgrade only: each mask clears bits from the real host mask, never sets
+     * one.  Setting a capability the CPU lacks would select a backend whose
+     * instructions trap (SIGILL) on this hardware.  On an AVX2 host this walks
+     * avx2[+vpclmul] -> avx2 -> sse2; on an SSE2-only host every mask resolves
+     * to sse2; on aarch64 it walks neon -> scalar.
+     */
+    masks[nm++] = host;                         /* best */
+    masks[nm++] = host & ~ICHOR_CPU_VPCLMULQDQ; /* drop vpclmul */
+    masks[nm++] =
+        host & ~(ICHOR_CPU_AVX2 | ICHOR_CPU_VPCLMULQDQ); /* SSE2/NEON */
+    masks[nm++] =
+        host & ~(ICHOR_CPU_AVX2 | ICHOR_CPU_VPCLMULQDQ | ICHOR_CPU_NEON);
+
+    for (i = 0; i < nm; i++) {
+        const ichor_gf2x_ops_t *ops;
+        int bad;
+
+        ichor_cpu_features_override(masks[i]);
+        ichor_gf2x_dispatch_reset();
+        bad = scatter_matches_scalar_allprimes();
+        ops = atomic_load_explicit(&ichor_gf2x_ops, memory_order_acquire);
+        seen[i] = (ops != NULL) ? ops->name : "(uninit)";
+        total++;
+        if (bad != 0) {
+            printf("  FAIL scatter backend=%s (%d mismatch)\n", seen[i], bad);
+            fails++;
+        }
+    }
+
+    ichor_cpu_features_override(host);
+    ichor_gf2x_dispatch_reset();
+
+    printf("  scatter backends exercised:");
+    for (i = 0; i < nm; i++)
+        printf(" %s", seen[i]);
+    printf("\n");
+}
+#else
+/* The backend sweep needs the test-only feature override; no-op without it. */
+static void
+run_scatter_backend_tests(void)
+{
+}
+#endif /* ICHOR_ENABLE_FORCE_BACKEND */
+
+/*
+ * ichor_gf2x_compact vs a naive reference, for every shipped prime.  Builds n0
+ * random circulant blocks, derives the expected ascending support by scanning
+ * them in block order, then compacts block-by-block (threading `count`) and
+ * checks the recovered index list and final count match.  Compact is the inverse
+ * of scatter: scanning positions [0, p) ascending recovers the support sorted by
+ * global position, which is exactly the reference scan order.
+ */
+static void
+run_compact_tests(void)
+{
+    static const struct {
+        uint32_t p, n0;
+    } cfg[] = {
+        {7829u, 5u},
+        {13613u, 2u},
+        {24733u, 5u},
+        {43451u, 2u},
+    };
+    uint32_t seed = 0x89abcdefu;
+    size_t ci;
+
+    for (ci = 0; ci < sizeof cfg / sizeof cfg[0]; ci++) {
+        uint32_t p = cfg[ci].p, n0 = cfg[ci].n0, b, pos, texp = 0;
+        size_t bb = (p + 7u) / 8u;
+        uint8_t topmask = (p & 7u) ? (uint8_t)((1u << (p & 7u)) - 1u) : 0xFFu;
+        uint8_t *blocks = malloc((size_t)n0 * bb);
+        uint32_t *exp = malloc((size_t)n0 * p * sizeof *exp);
+        uint32_t *got = malloc((size_t)n0 * p * sizeof *got);
+        uint32_t count = 0;
+        int okall = 1;
+
+        if (blocks == NULL || exp == NULL || got == NULL) {
+            printf("  FAIL compact alloc\n");
+            fails++;
+            total++;
+            free(blocks);
+            free(exp);
+            free(got);
+            return;
+        }
+
+        /* Sparse random blocks (~1/32 density, near real support weights). */
+        for (b = 0; b < n0; b++) {
+            memset(blocks + (size_t)b * bb, 0, bb);
+            for (pos = 0; pos < p; pos++) {
+                seed = seed * 1103515245u + 12345u;
+                if ((seed >> 27) == 0u)
+                    blocks[(size_t)b * bb + (pos >> 3)] |=
+                        (uint8_t)(1u << (pos & 7u));
+            }
+            blocks[(size_t)b * bb + bb - 1] &= topmask;
+        }
+
+        /* Reference: ascending support in block order. */
+        for (b = 0; b < n0; b++)
+            for (pos = 0; pos < p; pos++)
+                if (blocks[(size_t)b * bb + (pos >> 3)] >> (pos & 7u) & 1u)
+                    exp[texp++] = b * p + pos;
+
+        memset(got, 0, (size_t)texp * sizeof *got);
+        for (b = 0; b < n0; b++)
+            count = ichor_gf2x_compact(got, texp, blocks + (size_t)b * bb, bb,
+                                       b * p, p, count);
+
+        if (count != texp || memcmp(got, exp, (size_t)texp * sizeof *got) != 0)
+            okall = 0;
+
+        total++;
+        if (!okall) {
+            printf("  FAIL compact p=%u (count %u, expected %u)\n", p, count,
+                   texp);
+            fails++;
+        }
+        free(blocks);
+        free(exp);
+        free(got);
     }
 }
 
@@ -308,6 +509,10 @@ main(void)
     /* Fixed-weight support scatter (shared with the syndrome sampler and the
      * voleith opener). */
     run_scatter_tests();
+    run_scatter_backend_tests();
+
+    /* Fixed-weight support compaction (the opener-side inverse of scatter). */
+    run_compact_tests();
 
     printf("\n%d / %d checks passed\n", total - fails, total);
     return fails == 0 ? 0 : 1;

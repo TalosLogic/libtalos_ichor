@@ -138,13 +138,40 @@ int ichor_gf2x_inv(const ichor_gf2x_ring *ring, uint64_t *r, const uint64_t *a,
  * scatter is performed).  span is typically the ring prime p and block_bytes
  * ceil(span / 8).
  *
- * Only positions [0, span) are meaningful.  When span is not a multiple of 8,
- * an index from an adjacent block (idx - base in [span, 8*block_bytes)) may set
- * a pad bit in the top byte; this is why callers scattering block-by-block feed
- * the result through ichor_gf2x_load, which masks to the canonical p-bit form.
- * Do not consume the raw bytes above position span without that canonicalization.
+ * Only positions [0, span) are meaningful, and after the in-span gate only those
+ * are ever written: an index localizing outside [0, span) (a different circulant
+ * block, or the padding bits of the final partial word when span is not a
+ * multiple of 8) contributes nothing, so the bytes above position span are left
+ * zero.  Callers scattering block-by-block still pass the result through
+ * ichor_gf2x_load (which masks to the canonical p-bit form) as a matter of
+ * course; do not consume the raw bytes above position span without that
+ * canonicalization.
  */
 void ichor_gf2x_scatter(uint8_t *block, size_t block_bytes, const uint32_t *idx,
                         uint32_t w, uint32_t base, uint32_t span);
+
+/*
+ * Obliviously compact one dense ring element into the running support list: the
+ * inverse of ichor_gf2x_scatter.  Scans positions [0, span) of `block`
+ * (`block_bytes`, little-endian LSB-first) in order; for each set bit, writes its
+ * global position `base + pos` into output slot `count` and increments `count`,
+ * where `count` is the number of set bits seen so far (the next free slot).
+ * `count` is passed in and the updated value returned, so a caller recovers a
+ * multi-block support by threading `count` through one call per circulant block
+ * (varying `base` and zeroing `idx` once, before the first block).  `idx` has `t`
+ * slots; a caller must guarantee the total set weight across all blocks is <= t
+ * (the fixed-weight opener verifies wt == t first).
+ *
+ * Constant-time over the secret block: the loop bounds (span, t) and every read
+ * and write address are public, the per-position gate is an opaque 0/~0 mask
+ * (ichor_ct_mask64) applied uniformly, and each set bit is placed by sweeping all
+ * t slots under a constant-time equality mask, so `count` is only ever compared,
+ * never used as an index, and the access pattern does not depend on the support.
+ * block_bytes is the buffer bound (ceil(span / 8)); only positions [0, span) are
+ * read.
+ */
+uint32_t ichor_gf2x_compact(uint32_t *idx, uint32_t t, const uint8_t *block,
+                            size_t block_bytes, uint32_t base, uint32_t span,
+                            uint32_t count);
 
 #endif /* ICHOR_GF2X_H */

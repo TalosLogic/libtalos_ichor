@@ -25,6 +25,9 @@
  * (tools/dudect/targets_sample.c).
  */
 #include "sample.h"
+
+#include "cpu.h"
+#include "sample_dispatch.h"
 #include "util.h"
 
 #include <stdint.h>
@@ -303,6 +306,147 @@ test_validation(void)
           ichor_sample_fixed_weight(idx, 16, 64, 128, tape, good + 1) == -1);
 }
 
+#ifdef ICHOR_ENABLE_FORCE_BACKEND
+/*
+ * reduce_batch equivalence across every backend reachable on this host.  Like
+ * the gf2x scatter sweep, the override only ever CLEARS feature bits (never sets
+ * one the CPU lacks, which would SIGILL): on an AVX2 host this walks avx2 ->
+ * sse2, on an SSE2-only host it stays sse2, on aarch64 it walks neon -> scalar.
+ * Every backend must match ichor_sample_reduce_batch_scalar bit-for-bit.
+ */
+static int
+reduce_batch_matches_scalar(void)
+{
+    static const struct {
+        uint32_t w, n;
+        int lambda;
+    } cases[] = {
+        {7, 64, 128},
+        {50, 300, 256},
+        {130, 800, 128},
+        {261, 2000, 256},
+    };
+    uint8_t tape[512 * 40];
+    uint32_t got[ICHOR_SAMPLE_MAXW], ref[ICHOR_SAMPLE_MAXW];
+    size_t c;
+    int bad = 0;
+
+    for (c = 0; c < sizeof(cases) / sizeof(cases[0]); c++) {
+        uint32_t w = cases[c].w, n = cases[c].n;
+        int lambda = cases[c].lambda;
+        size_t db = ichor_sample_draw_bytes(lambda);
+        unsigned limbs = (unsigned)(db / 4u);
+        size_t tlen = ichor_sample_fixed_weight_tape_bytes(lambda, w);
+        uint64_t seed;
+
+        for (seed = 1; seed <= 16; seed++) {
+            uint32_t i;
+
+            fill_tape(tape, tlen, seed * 0x9e3779b97f4a7c15ULL);
+            ichor_sample_reduce_batch(got, tape, w, n, limbs, db);
+            ichor_sample_reduce_batch_scalar(ref, tape, w, n, limbs, db);
+            for (i = 0; i < w; i++)
+                if (got[i] != ref[i])
+                    bad++;
+        }
+    }
+    return bad;
+}
+
+/*
+ * Full-pipeline (reduce_batch + overlay_resolve) equivalence to the independent
+ * reference Fisher-Yates, for the currently selected backend.  This is what
+ * exercises the overlay resolve per backend (reduce_batch_matches_scalar covers
+ * only the reduction).
+ */
+static int
+fixed_weight_matches_ref(void)
+{
+    static const struct {
+        uint32_t w, n;
+        int lambda;
+    } cases[] = {
+        {7, 64, 128},
+        {50, 300, 256},
+        {130, 800, 128},
+        {261, 2000, 256},
+    };
+    uint8_t tape[512 * 40];
+    uint32_t got[ICHOR_SAMPLE_MAXW], ref[ICHOR_SAMPLE_MAXW];
+    size_t c;
+    int bad = 0;
+
+    for (c = 0; c < sizeof(cases) / sizeof(cases[0]); c++) {
+        uint32_t w = cases[c].w, n = cases[c].n;
+        int lambda = cases[c].lambda;
+        size_t tlen = ichor_sample_fixed_weight_tape_bytes(lambda, w);
+        uint64_t seed;
+
+        for (seed = 1; seed <= 16; seed++) {
+            uint32_t i;
+
+            fill_tape(tape, tlen, seed * 0x9e3779b97f4a7c15ULL);
+            if (ichor_sample_fixed_weight(got, w, n, lambda, tape, tlen) != 0) {
+                bad++;
+                continue;
+            }
+            ref_fisher_yates(ref, w, n, lambda, tape);
+            for (i = 0; i < w; i++)
+                if (got[i] != ref[i])
+                    bad++;
+        }
+    }
+    return bad;
+}
+
+static void
+run_sample_backend_tests(void)
+{
+    uint32_t host = ichor_cpu_features();
+    uint32_t masks[4];
+    const char *seen[4];
+    size_t nm = 0, i;
+
+    /*
+     * Downgrade-only (never fabricate a capability the CPU lacks, which would
+     * SIGILL).  On an SSE4.1 x86 host this walks sse41 -> sse41 -> sse2 -> sse2,
+     * exercising both the SSE4.1 overlay resolve and the SSE2 tier's scalar
+     * resolve; on aarch64, neon -> neon -> neon -> scalar.
+     */
+    masks[nm++] = host;
+    masks[nm++] = host & ~ICHOR_CPU_AVX2;
+    masks[nm++] = host & ~(ICHOR_CPU_AVX2 | ICHOR_CPU_SSE41);
+    masks[nm++] = host & ~(ICHOR_CPU_AVX2 | ICHOR_CPU_SSE41 | ICHOR_CPU_NEON);
+
+    for (i = 0; i < nm; i++) {
+        const ichor_sample_ops_t *ops;
+
+        ichor_cpu_features_override(masks[i]);
+        ichor_sample_dispatch_reset();
+        check("reduce_batch backend matches scalar",
+              reduce_batch_matches_scalar() == 0);
+        check("fixed_weight backend matches reference",
+              fixed_weight_matches_ref() == 0);
+        ops = atomic_load_explicit(&ichor_sample_ops, memory_order_acquire);
+        seen[i] = (ops != NULL) ? ops->name : "(uninit)";
+    }
+
+    ichor_cpu_features_override(host);
+    ichor_sample_dispatch_reset();
+
+    printf("  reduce_batch backends exercised:");
+    for (i = 0; i < nm; i++)
+        printf(" %s", seen[i]);
+    printf("\n");
+}
+#else
+/* The backend sweep needs the test-only feature override; no-op without it. */
+static void
+run_sample_backend_tests(void)
+{
+}
+#endif /* ICHOR_ENABLE_FORCE_BACKEND */
+
 int
 main(void)
 {
@@ -313,6 +457,7 @@ main(void)
     test_equiv_and_properties();
     test_sort_ascending();
     test_validation();
+    run_sample_backend_tests();
 
     printf("  %d / %d passed\n", pass_count, test_count);
     return (pass_count == test_count) ? 0 : 1;

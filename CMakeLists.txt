@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 
 cmake_minimum_required(VERSION 3.16)
-project(libtalos_ichor VERSION 1.3.0 LANGUAGES C
+project(libtalos_ichor VERSION 1.4.0 LANGUAGES C
     DESCRIPTION "Shared constant-time symmetric primitives for the talos libraries")
 
 # include/ichor/version.h is the consumer-facing statement of the same
@@ -41,6 +41,10 @@ option(ICHOR_GF16_SSSE3 "Compile the SSSE3 GF(2^16) region-multiply backend (x86
 option(ICHOR_GF16_GFNI "Compile the GFNI affine GF(2^16) region-multiply backend (x86_64; needs AVX2)" ON)
 option(ICHOR_GF256_NEON "Compile the NEON TBL GF(2^8) region-multiply backend (aarch64)" ON)
 option(ICHOR_GF16_NEON "Compile the NEON TBL GF(2^16) region-multiply backend (aarch64)" ON)
+option(ICHOR_GF2X_SSE2 "Compile the SSE2 gf2x circulant-rotation backend (x86_64)" ON)
+option(ICHOR_GF2X_AVX2 "Compile the AVX2 gf2x circulant-rotation backend (x86_64)" ON)
+option(ICHOR_GF2X_NEON "Compile the NEON gf2x circulant-rotation backend (aarch64)" ON)
+option(ICHOR_GF2X_VPCLMUL "Compile the VPCLMULQDQ gf2x wide-schoolbook multiply backend (x86_64)" ON)
 option(ICHOR_KECCAK_X4_AVX2 "Compile the AVX2 4-way Keccak-f[1600] backend (x86_64)" ON)
 option(ICHOR_KECCAK_SHA3 "Compile the ARMv8.2 SHA-3 single-sponge Keccak-f[1600] backend (aarch64)" ON)
 option(ICHOR_THREADS "Build the ichor thread pool (POSIX threads); OFF compiles a serial fallback" ON)
@@ -366,6 +370,101 @@ if(ICHOR_GF16_SSSE3)
 endif()
 
 #
+# SSE2 probe (x86_64) for the gf2x circulant barrel rotation.  SSE2 is baseline
+# on x86_64; the probe only confirms the toolchain is x86 and the 128-bit
+# shift / load / store intrinsics the kernel uses compile, so HAVE_GF2X_SSE2 is
+# set only where they do and -msse2 is never emitted on a non-x86 toolchain.
+#
+if(ICHOR_GF2X_SSE2)
+    include(CheckCSourceCompiles)
+    set(CMAKE_REQUIRED_FLAGS "-msse2")
+    check_c_source_compiles("
+        #include <emmintrin.h>
+        int main(void) {
+            __m128i a = _mm_setzero_si128();
+            __m128i c = _mm_cvtsi32_si128(3);
+            __m128i r = _mm_or_si128(_mm_sll_epi64(a, c), _mm_srl_epi64(a, c));
+            return _mm_cvtsi128_si32(_mm_xor_si128(r, a));
+        }
+    " HAVE_GF2X_SSE2)
+    unset(CMAKE_REQUIRED_FLAGS)
+endif()
+
+#
+# AVX2 probe (x86_64) for the gf2x circulant barrel rotation.  The kernel needs
+# the 256-bit variable 64-bit shifts and bitwise ops; HAVE_GF2X_AVX2 is set only
+# where they compile, so -mavx2 is never emitted on a non-x86 toolchain.  The
+# backend is runtime-gated on ICHOR_CPU_AVX2 (AVX2 is not baseline).
+#
+if(ICHOR_GF2X_AVX2)
+    include(CheckCSourceCompiles)
+    set(CMAKE_REQUIRED_FLAGS "-mavx2")
+    check_c_source_compiles("
+        #include <immintrin.h>
+        int main(void) {
+            __m256i a = _mm256_setzero_si256();
+            __m128i c = _mm_cvtsi32_si128(3);
+            __m256i r = _mm256_or_si256(_mm256_sll_epi64(a, c),
+                                        _mm256_srl_epi64(a, c));
+            return _mm256_extract_epi32(_mm256_xor_si256(r, a), 0);
+        }
+    " HAVE_GF2X_AVX2)
+    unset(CMAKE_REQUIRED_FLAGS)
+endif()
+
+#
+# VPCLMULQDQ probe (x86_64) for the gf2x Karatsuba base-case multiply.  The
+# kernel needs the 256-bit two-lane carry-less product; HAVE_GF2X_VPCLMUL is set
+# only where it compiles, so -mvpclmulqdq is never emitted on a non-x86
+# toolchain.  The backend is runtime-gated on ICHOR_CPU_AVX2 and
+# ICHOR_CPU_VPCLMULQDQ, and is only selected together with the AVX2 rotation
+# backend (a VPCLMULQDQ host is always an AVX2 host).
+#
+if(ICHOR_GF2X_VPCLMUL)
+    include(CheckCSourceCompiles)
+    # GCC gates the 128-bit _mm_clmulepi64_si128 (used for the odd-column tail)
+    # on -mpclmul specifically; -mvpclmulqdq does not imply it, so list both.
+    set(CMAKE_REQUIRED_FLAGS "-mvpclmulqdq -mpclmul -mavx2")
+    check_c_source_compiles("
+        #include <immintrin.h>
+        int main(void) {
+            __m256i a = _mm256_set1_epi64x(3);
+            __m256i b = _mm256_set_epi64x(0, 5, 0, 7);
+            __m256i p = _mm256_clmulepi64_epi128(a, b, 0x00);
+            __m128i q = _mm_clmulepi64_si128(_mm_set1_epi64x(3),
+                                             _mm_set1_epi64x(5), 0x00);
+            return (int)_mm256_extract_epi64(p, 0) ^ (int)_mm_extract_epi64(q, 0);
+        }
+    " HAVE_GF2X_VPCLMUL)
+    unset(CMAKE_REQUIRED_FLAGS)
+endif()
+
+#
+# NEON probe (aarch64) for the gf2x circulant barrel rotation.  Advanced SIMD is
+# mandatory on ARMv8-A, so no arch flag is needed; the #error pins the probe to
+# aarch64 so HAVE_GF2X_NEON is never set on 32-bit ARM (whose NEON is optional
+# and which ichor's dispatch leaves on the scalar path via ICHOR_CPU_NEON).
+#
+if(ICHOR_GF2X_NEON)
+    include(CheckCSourceCompiles)
+    check_c_source_compiles("
+        #include <stdint.h>
+        #include <arm_neon.h>
+        #if !defined(__aarch64__)
+        #error gf2x NEON backend targets aarch64
+        #endif
+        int main(void) {
+            uint64_t buf[2] = {1, 0};
+            uint64x2_t a = vld1q_u64(buf);
+            a = vorrq_u64(vshlq_u64(a, vdupq_n_s64(3)),
+                          vshlq_u64(a, vdupq_n_s64(-5)));
+            vst1q_u64(buf, veorq_u64(a, a));
+            return (int)buf[0];
+        }
+    " HAVE_GF2X_NEON)
+endif()
+
+#
 # AVX2 probe (x86_64) for the GF(2^8) split-nibble region multiply.
 # HAVE_GF256_AVX2 is set only where the 256-bit vpshufb intrinsic compiles, so
 # -mavx2 is never emitted on a non-x86 toolchain.  gf16 has no AVX2 vpshufb
@@ -530,6 +629,22 @@ else()
     message(STATUS "ichor: Keccak single-sponge backend = scalar (portable software)")
 endif()
 
+if(HAVE_GF2X_AVX2)
+    message(STATUS "ichor: gf2x rotation backend = AVX2 256-bit + SSE2 128-bit (x86_64) + scalar fallback")
+elseif(HAVE_GF2X_SSE2)
+    message(STATUS "ichor: gf2x rotation backend = SSE2 128-bit (x86_64) + scalar fallback")
+elseif(HAVE_GF2X_NEON)
+    message(STATUS "ichor: gf2x rotation backend = NEON 128-bit (aarch64) + scalar fallback")
+else()
+    message(STATUS "ichor: gf2x rotation backend = scalar software only (constant-time)")
+endif()
+
+if(HAVE_GF2X_VPCLMUL AND HAVE_GF2X_AVX2)
+    message(STATUS "ichor: gf2x multiply backend = VPCLMULQDQ 256-bit wide schoolbook (x86_64) + scalar fallback")
+else()
+    message(STATUS "ichor: gf2x multiply backend = scalar (dispatched 64x64 clmul)")
+endif()
+
 set(ICHOR_SOURCES
     src/util.c
     src/cpu.c
@@ -569,7 +684,15 @@ set(ICHOR_SOURCES
     src/grostl_avx2_gfni.c
     src/grostl_armv8.c
     src/gf2x.c
+    src/gf2x_sse2.c
+    src/gf2x_avx2.c
+    src/gf2x_neon.c
+    src/gf2x_vpclmul.c
     src/sample.c
+    src/sample_sse2.c
+    src/sample_sse41.c
+    src/sample_avx2.c
+    src/sample_neon.c
     src/pool.c)
 
 add_library(ichor STATIC ${ICHOR_SOURCES})
@@ -723,6 +846,41 @@ if(HAVE_KECCAK_SHA3)
     target_compile_definitions(ichor PUBLIC ICHOR_HAVE_KECCAK_X4_SHA3)
     set_source_files_properties(src/keccak_x4_sha3_neon.c PROPERTIES
         COMPILE_FLAGS "${SHA3_FLAGS}")
+endif()
+if(HAVE_GF2X_SSE2)
+    target_compile_definitions(ichor PUBLIC ICHOR_HAVE_GF2X_SSE2)
+    set_source_files_properties(src/gf2x_sse2.c PROPERTIES
+        COMPILE_FLAGS "-msse2")
+    # The sampler's Lemire batch kernel needs the same SSE2 intrinsics.
+    target_compile_definitions(ichor PUBLIC ICHOR_HAVE_SAMPLE_SSE2)
+    set_source_files_properties(src/sample_sse2.c PROPERTIES
+        COMPILE_FLAGS "-msse2")
+    # The sampler's overlay-resolve kernel needs the SSE4.1 32-bit max; its TU
+    # builds with -msse4.1 and is runtime-gated on ICHOR_CPU_SSE41 (SSE4.1 is not
+    # baseline on x86_64).  SSE2-only hosts keep the scalar resolve.
+    target_compile_definitions(ichor PUBLIC ICHOR_HAVE_SAMPLE_SSE41)
+    set_source_files_properties(src/sample_sse41.c PROPERTIES
+        COMPILE_FLAGS "-msse4.1")
+endif()
+if(HAVE_GF2X_AVX2)
+    target_compile_definitions(ichor PUBLIC ICHOR_HAVE_GF2X_AVX2)
+    set_source_files_properties(src/gf2x_avx2.c PROPERTIES
+        COMPILE_FLAGS "-mavx2")
+    target_compile_definitions(ichor PUBLIC ICHOR_HAVE_SAMPLE_AVX2)
+    set_source_files_properties(src/sample_avx2.c PROPERTIES
+        COMPILE_FLAGS "-mavx2")
+endif()
+# VPCLMULQDQ rides on the AVX2 rotation backend (the combined ops table lives in
+# gf2x_avx2.c), so define it only when both are available.
+if(HAVE_GF2X_VPCLMUL AND HAVE_GF2X_AVX2)
+    target_compile_definitions(ichor PUBLIC ICHOR_HAVE_GF2X_VPCLMUL)
+    set_source_files_properties(src/gf2x_vpclmul.c PROPERTIES
+        COMPILE_FLAGS "-mvpclmulqdq -mpclmul -mavx2")
+endif()
+if(HAVE_GF2X_NEON)
+    # Advanced SIMD is baseline on aarch64, so no per-TU arch flag.
+    target_compile_definitions(ichor PUBLIC ICHOR_HAVE_GF2X_NEON)
+    target_compile_definitions(ichor PUBLIC ICHOR_HAVE_SAMPLE_NEON)
 endif()
 
 # Software-only companion library.  Same sources as `ichor` minus the

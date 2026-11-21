@@ -40,6 +40,7 @@ extern const dudect_target_t target_gf2x_rotl_amount;
 extern const dudect_target_t target_gf2x_ct_select;
 extern const dudect_target_t target_gf2x_inv;
 extern const dudect_target_t target_gf2x_scatter;
+extern const dudect_target_t target_gf2x_compact;
 extern const dudect_target_t target_sample_tape;
 
 static const dudect_target_t *const target_registry[] = {
@@ -59,6 +60,7 @@ static const dudect_target_t *const target_registry[] = {
     &target_gf2x_ct_select,
     &target_gf2x_inv,
     &target_gf2x_scatter,
+    &target_gf2x_compact,
     &target_sample_tape,
     NULL,
 };

@@ -18,7 +18,7 @@ one clean-room, constant-time place instead of duplicated per repo.
 | `<ichor/clmul.h>`   | 64×64→128-bit carry-less (polynomial) multiply: PCLMULQDQ (x86_64), PMULL (aarch64), and a constant-time scalar fallback. `ichor_clmul64_x2` computes two independent products per call. The shared atom for binary-field arithmetic. |
 | `<ichor/aesdm.h>`   | AES-128 Davies-Meyer single-block compression. |
 | `<ichor/hirose.h>`  | Hirose double-block-length compression over AES-256 (256-bit output). |
-| `<ichor/gf2x.h>`    | Constant-time circulant arithmetic over F_2[x]/(x^p - 1) (multiply, rotate, invert) for QC-MDPC codes; the shared ring beneath libtalos_syndrome and libtalos_voleith. |
+| `<ichor/gf2x.h>`    | Constant-time circulant arithmetic over F_2[x]/(x^p - 1) (multiply, rotate, invert, and oblivious support scatter / compact) for QC-MDPC codes; the shared ring beneath libtalos_syndrome and libtalos_voleith. Barrel rotation, reduction, select, and compaction are runtime-dispatched: AVX2 / SSE2 (x86_64), NEON (aarch64), and a constant-time scalar fallback, with a VPCLMULQDQ wide-schoolbook multiply (x86_64) over the dispatched `ichor_clmul64`. |
 | `<ichor/gf256.h>`   | Constant-time GF(2^8) region multiply over the AES polynomial 0x11B (`ichor_gf256_mul_region` / `_muladd_region`): the Reed-Solomon / RLNC axpy. Runtime-dispatched: GFNI `GF2P8MULB`, AVX2 / SSSE3 split-nibble vpshufb (x86_64), NEON TBL (aarch64), and a constant-time scalar fallback. |
 | `<ichor/gf16.h>`    | Constant-time GF(2^16) region multiply over 0x1100B (the network-coding / RLNC field), same API. Runtime-dispatched: GFNI affine, SSSE3 vpshufb (x86_64), NEON TBL (aarch64), and a constant-time scalar fallback. |
 | `<ichor/sample.h>`  | Constant-time fixed-weight index sampling from a caller-supplied random tape: `ichor_sample_fixed_weight` draws `w` distinct indices in `[0, n)` in draw order (a pure function of the tape, fixed consumption) via overlay Fisher-Yates + widened Lemire reduction; `ichor_sample_sort_ascending` canonicalizes a drawn support to ascending order with a constant-time bitonic network. The shared support sampler for fixed-weight errors. |
@@ -68,7 +68,9 @@ test / dudect builds and absent from a release or vendored build.
 
 `ichor_cpu_features()` reports `ICHOR_CPU_AVX`, `ICHOR_CPU_AVX2`, and
 `ICHOR_CPU_FMA`. As of 1.3.0 `ICHOR_CPU_AVX2` steers ichor's own dispatch (the
-AVX2 gf256 / Grøstl backends, 4-way Keccak, and the VAES AES path). `ICHOR_CPU_AVX`
+AVX2 gf256 / Grøstl backends, 4-way Keccak, and the VAES AES path); 1.4.0 adds
+the AVX2 gf2x circulant-rotation backend (and, with `ICHOR_CPU_VPCLMULQDQ`, its
+wide-schoolbook multiply). `ICHOR_CPU_AVX`
 and `ICHOR_CPU_FMA` steer no ichor dispatch (ichor uses no 128-bit-VEX AVX or FMA);
 they are exposed so a consumer that runs its own kernels can drive tier selection
 from the same cached feature word rather than duplicating CPUID logic. Each is
@@ -237,6 +239,16 @@ flags can alter the emitted code and invalidate them; in particular, do not add
 a secret-dependent branch. If you change either, re-running the harness and
 re-checking the disassembly is the builder's responsibility.
 
+Relatedly, the constant-time paths avoid a native integer multiply or divide on
+a secret operand: on platforms that provide DOITM (whose default instruction
+timing can be data-operand-dependent) those instructions can leak through their
+latency unless DOITM is enabled. The fixed-weight sampler's Lemire reduction
+therefore multiplies the secret draw by the public range with a constant-time
+shift-add (`ct_mul32_pub`), not a native multiply, so it stays constant-time by
+construction with or without DOITM; do not "optimize" it back to `draw * range`. The carry-less multiply
+(`clmul`) and the GF(2^8) / GF(2^16) field multiplies are shift/xor with
+`pclmul` / `pmull`, not native integer multiplies, so they are unaffected.
+
 ## Provenance
 
 Clean-room, no third-party code. Every primitive here (AES and CPU dispatch,
@@ -288,6 +300,9 @@ ctest --test-dir build
 | `ICHOR_GF256_SSSE3` / `_AVX2` / `_GFNI` | `ON` | GF(2^8) region-multiply backends (x86_64) |
 | `ICHOR_GF16_SSSE3` / `_GFNI` | `ON` | GF(2^16) region-multiply backends (x86_64) |
 | `ICHOR_GF256_NEON` / `ICHOR_GF16_NEON` | `ON` | NEON TBL region-multiply backends (aarch64) |
+| `ICHOR_GF2X_SSE2` / `_AVX2` | `ON` | SSE2 / AVX2 gf2x circulant-rotation backends (x86_64) |
+| `ICHOR_GF2X_VPCLMUL` | `ON` | VPCLMULQDQ gf2x wide-schoolbook multiply backend (x86_64) |
+| `ICHOR_GF2X_NEON`   | `ON`  | NEON gf2x circulant-rotation backend (aarch64) |
 | `ICHOR_KECCAK_X4_AVX2` | `ON` | AVX2 4-way Keccak-f[1600] backend (x86_64) |
 | `ICHOR_KECCAK_SHA3` | `ON`  | ARMv8.2 SHA-3 Keccak-f[1600] backend (aarch64) |
 | `ICHOR_THREADS`     | `ON`  | Build the thread pool (`<ichor/pool.h>`) on POSIX threads; `OFF` compiles the serial fallback and links no threading library |

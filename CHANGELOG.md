@@ -5,6 +5,67 @@ All notable changes to libtalos_ichor are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 1.4.0
+
+### Added
+
+- `<ichor/gf2x.h>`: runtime-dispatched SIMD backends for the circulant barrel
+  rotation, the mod-(x^p - 1) reduction, and the `rotl_var` per-step
+  constant-time select (incl. the fused barrel step): SSE2 / AVX2 (x86_64) and
+  NEON (aarch64), plus a VPCLMULQDQ 256-bit wide-schoolbook multiply (x86_64)
+  over the dispatched `ichor_clmul64`. Backend picked once from
+  `ichor_cpu_features()`; the scalar path stays the bit-identical reference, so
+  KATs hold across backends and every path is constant-time (#30, #31).
+
+- `<ichor/gf2x.h>`: `ichor_gf2x_compact`, the opener-side inverse of
+  `ichor_gf2x_scatter`: constant-time word-parallel dense-ring-element to
+  fixed-weight-support compaction. Scans every position obliviously and writes
+  each set bit's global position into output slot `count` by sweeping all `t`
+  slots under a constant-time equality mask (`count` is only compared, never used
+  as an address), with a `base`/`span` offset for per-block calls. Dispatch
+  scalar / SSE2 / AVX2 / NEON. Test (`run_compact_tests`, vs a naive reference) +
+  dudect target (`gf2x_compact`). First consumer: libtalos_syndrome's Argus
+  opener `extract_indices` (#32).
+
+### Changed
+
+- `<ichor/gf2x.h>`: `ichor_gf2x_rotl_fixed` reworked into a single-pass funnel
+  shift (the two wrap regions XORed directly, no double-width buffer plus
+  separate reduce). Bit-identical output; feeds both the scalar path and the
+  SIMD barrel (#29).
+
+### Fixed
+
+- `ichor_gf2x_scatter`: an out-of-span index that localized into the padding bits
+  of the final partial 64-bit word was written instead of ignored (the span check
+  was word-granular only). A caller that passes out-of-span indices expecting them
+  dropped could get a spurious bit set; in libtalos_syndrome this inflated the KEM
+  decapsulation-failure rate far above its design target. Fixed with a branch-free
+  `loc < span` gate; byte-identical for all in-span callers, constant-time
+  preserved. Correctness/availability only -- no key- or data-confidentiality
+  impact.
+
+- Constant-time hardening of scalar sites that built secret-dependent masks
+  with inline `0 - bit` arithmetic rather than the `ichor_ct_mask64` volatile
+  barrier, letting an optimizer lower the masked selects to secret-dependent
+  branches: `ichor_gf2x_scatter` (`scatter_bit_at`, the word-equality
+  accumulate, and the span gate), and the fixed-weight sampler's `ct_eq32` /
+  `ct_lt32` compare helpers (driving the Fisher-Yates overlay resolve and the
+  bitonic compare-exchange). scatter has carried this since it was introduced in
+  1.1.0 and was observed as a dudect timing leak on the support; the sampler
+  sites share the pattern (dudect green, hardened alongside). All routed through
+  `ichor_ct_mask64` / `ichor_ct_select64`; byte-identical output, and whether a
+  given prior release leaked depends on its build toolchain (#32).
+
+- `ichor_sample_fixed_weight`: the Lemire reduction multiplied the secret draw by
+  the public range with a native integer multiply. On platforms that provide
+  DOITM (whose default instruction timing can be data-operand-dependent) this
+  surfaced as a dudect timing leak; parts without that behavior were unaffected.
+  Replaced with a constant-time shift-add over the public range (ct_mul32_pub),
+  so the secret draw never reaches a native multiply and the sampler is
+  constant-time by construction with or without DOITM. Byte-identical draws, so
+  KATs and goldens are unchanged. Present since the sampler landed in 1.1.0 (#32).
+
 ## 1.3.0
 
 ### Added

@@ -287,3 +287,61 @@ const dudect_target_t target_gf2x_scatter = {
     .state_size = sizeof(gf2x_state_t),
     .reps_per_trial = 8,
 };
+
+/* ----- compact: secret support (clustered vs spread) ---------------- */
+/*
+ * ichor_gf2x_compact (the opener-side inverse of scatter) scans every position
+ * and sweeps every output slot regardless of the support values, and `count` is
+ * only ever compared, never used as an address, so two dense blocks of the same
+ * weight (class 0 clustered at the low positions, class 1 spread across the ring)
+ * must not diverge in timing.  This is the target guarding the clang >= 17 branch
+ * hoist the opener defeats via ichor_ct_mask64 (a leak here shows as a split).
+ * One block of the n0=2 / lambda128 prime at the set's weight t; the control flow
+ * is size-independent, so this suffices.
+ */
+static uint8_t *g_cblock0, *g_cblock1;
+static uint32_t *g_cidx;
+
+static void
+gf2x_compact_setup(int cls, void *state)
+{
+    gf2x_init_once();
+    if (g_cblock0 == NULL) {
+        size_t bb = (GF2X_DUDECT_P + 7u) / 8u;
+        uint32_t step = GF2X_DUDECT_P / GF2X_DUDECT_SPARSE_WT;
+        unsigned k;
+
+        g_cblock0 = calloc(bb, 1);
+        g_cblock1 = calloc(bb, 1);
+        g_cidx = calloc(GF2X_DUDECT_SPARSE_WT, sizeof(uint32_t));
+        for (k = 0; k < GF2X_DUDECT_SPARSE_WT; k++) {
+            uint32_t p0 = k; /* clustered at the low positions */
+            uint32_t p1 = (uint32_t)k * step; /* spread across [0, p)      */
+
+            g_cblock0[p0 >> 3] |= (uint8_t)(1u << (p0 & 7u));
+            g_cblock1[p1 >> 3] |= (uint8_t)(1u << (p1 & 7u));
+        }
+    }
+    ((gf2x_state_t *)state)->cls = cls;
+}
+
+static void
+gf2x_compact_run(const void *state)
+{
+    const gf2x_state_t *s = (const gf2x_state_t *)state;
+    const uint8_t *block = s->cls ? g_cblock1 : g_cblock0;
+    size_t bb = (GF2X_DUDECT_P + 7u) / 8u;
+    uint32_t count;
+
+    count = ichor_gf2x_compact(g_cidx, GF2X_DUDECT_SPARSE_WT, block, bb, 0u,
+                               GF2X_DUDECT_P, 0u);
+    gf2x_target_sink ^= g_cidx[0] ^ count;
+}
+
+const dudect_target_t target_gf2x_compact = {
+    .name = "gf2x_compact",
+    .setup_class = gf2x_compact_setup,
+    .run = gf2x_compact_run,
+    .state_size = sizeof(gf2x_state_t),
+    .reps_per_trial = 8,
+};
